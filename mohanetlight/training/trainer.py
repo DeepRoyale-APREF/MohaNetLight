@@ -1,0 +1,323 @@
+"""League trainer — orchestrates PPO training with periodic league evaluation.
+
+Dataflow per iteration:
+1. Collect ``n_steps`` environment transitions against a random training opponent.
+2. Compute GAE advantages.
+3. Run ``n_epochs`` of PPO clipped updates (truncated BPTT).
+4. Every ``eval_interval`` updates, run a league tournament against heuristic bots.
+5. Save checkpoints periodically.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+import numpy as np
+import torch
+
+from clash_royale_gymnasium.env import ClashRoyaleGymEnv
+from clash_royale_gymnasium.league.player_slot import HeuristicSlot, PlayerSlot
+from clash_royale_gymnasium.league.tournament import LeagueTournament
+
+from mohanetlight.bots.strategies import default_bot_roster
+from mohanetlight.config import ModelConfig, TrainingConfig
+from mohanetlight.inference.agent import MohaNetAgent
+from mohanetlight.network.core import LSTMState
+from mohanetlight.network.mohanet import MohaNetLight
+from mohanetlight.training.ppo import PPOTrainer
+from mohanetlight.training.rollout import RolloutBuffer
+from mohanetlight.utils.tensor_utils import obs_to_tensors
+
+
+class LeagueTrainer:
+    """End-to-end PPO + league evaluation training loop.
+
+    Parameters
+    ----------
+    model_cfg : ModelConfig
+        Network architecture config.
+    train_cfg : TrainingConfig
+        PPO and training loop hyperparameters.
+    training_opponents : list[PlayerSlot] | None
+        Bots to sample from during data collection (default: heuristic roster).
+    eval_opponents : list[PlayerSlot] | None
+        Bots for periodic league evaluation (default: heuristic roster).
+    env_kwargs : dict | None
+        Extra kwargs forwarded to ``ClashRoyaleGymEnv``.
+    callback : Callable | None
+        Called after each update with ``(update_idx, metrics_dict)``.
+    """
+
+    def __init__(
+        self,
+        model_cfg: ModelConfig | None = None,
+        train_cfg: TrainingConfig | None = None,
+        training_opponents: Optional[List[PlayerSlot]] = None,
+        eval_opponents: Optional[List[PlayerSlot]] = None,
+        env_kwargs: Optional[Dict[str, Any]] = None,
+        callback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
+    ) -> None:
+        self.model_cfg = model_cfg or ModelConfig()
+        self.train_cfg = train_cfg or TrainingConfig()
+        self.device = torch.device(self.train_cfg.device)
+
+        # Model
+        self.model = MohaNetLight(self.model_cfg).to(self.device)
+        print(f"MohaNetLight — {self.model.count_parameters():,} parameters")
+
+        # PPO
+        self.ppo = PPOTrainer(self.model, self.train_cfg)
+
+        # Rollout buffer
+        self.buffer = RolloutBuffer(
+            n_steps=self.train_cfg.n_steps,
+            gamma=self.train_cfg.gamma,
+            gae_lambda=self.train_cfg.gae_lambda,
+        )
+
+        # Opponents
+        self.training_opponents = training_opponents or default_bot_roster()
+        self.eval_opponents = eval_opponents or [
+            HeuristicSlot("Heuristic-0.3", aggression=0.3, seed=100),
+            HeuristicSlot("Heuristic-0.5", aggression=0.5, seed=101),
+            HeuristicSlot("Heuristic-0.8", aggression=0.8, seed=102),
+        ] + default_bot_roster()[:5]
+
+        self.env_kwargs = env_kwargs or {}
+        self.callback = callback
+        self._rng = np.random.default_rng(42)
+
+        # Logging
+        self.log_dir = Path(self.train_cfg.log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._metrics_history: List[Dict[str, Any]] = []
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Main training loop
+    # ──────────────────────────────────────────────────────────────────────
+
+    def train(self) -> None:
+        """Run the full training loop for ``total_timesteps``."""
+        cfg = self.train_cfg
+        total_updates = cfg.total_timesteps // cfg.n_steps
+        global_step = 0
+
+        print(
+            f"Training: {cfg.total_timesteps:,} steps, "
+            f"{total_updates} updates × {cfg.n_steps} steps each"
+        )
+
+        for update_idx in range(1, total_updates + 1):
+            t0 = time.time()
+
+            # ── 1. Collect rollout ────────────────────────────────────────
+            rollout_info = self._collect_rollout()
+            global_step += cfg.n_steps
+
+            # ── 2. PPO update ─────────────────────────────────────────────
+            ppo_metrics = self.ppo.update(self.buffer)
+            self.buffer.reset()
+
+            elapsed = time.time() - t0
+            sps = cfg.n_steps / elapsed
+
+            metrics: Dict[str, Any] = {
+                "update": update_idx,
+                "global_step": global_step,
+                "sps": sps,
+                **ppo_metrics,
+                **rollout_info,
+            }
+
+            # ── 3. Periodic evaluation ────────────────────────────────────
+            if update_idx % cfg.eval_interval == 0:
+                eval_metrics = self._evaluate(update_idx)
+                metrics["eval"] = eval_metrics
+
+            # ── 4. Checkpoint ─────────────────────────────────────────────
+            if update_idx % cfg.checkpoint_interval == 0:
+                self._save_checkpoint(update_idx)
+
+            # ── 5. Log ────────────────────────────────────────────────────
+            self._log(metrics)
+            self._metrics_history.append(metrics)
+
+            if self.callback is not None:
+                self.callback(update_idx, metrics)
+
+        # Final save
+        self._save_checkpoint(total_updates)
+        self._save_metrics()
+        print("Training complete.")
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Rollout collection
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _collect_rollout(self) -> Dict[str, float]:
+        """Collect ``n_steps`` transitions into the rollout buffer."""
+        # Pick a random training opponent for this rollout
+        opp_idx = int(self._rng.integers(len(self.training_opponents)))
+        opp = self.training_opponents[opp_idx]
+        opp.reset()
+
+        env = ClashRoyaleGymEnv(
+            opponent=opp.to_player_interface(),
+            **self.env_kwargs,
+        )
+
+        obs, info = env.reset()
+        hidden = self.model.init_hidden(batch_size=1)
+        hidden = _to_device(hidden, self.device)
+
+        self.model.eval()
+
+        episode_rewards: List[float] = []
+        ep_reward = 0.0
+        n_episodes = 0
+
+        for _step in range(self.train_cfg.n_steps):
+            scalars, troops, troop_mask, cards, action_masks = obs_to_tensors(
+                obs, device=self.device,
+            )
+
+            output = self.model.act(
+                scalars, troops, troop_mask, cards, action_masks, hidden,
+            )
+
+            # Store transition
+            action_dict = {k: int(v.item()) for k, v in output.actions.items()}
+            self.buffer.add(
+                obs=obs,
+                action=action_dict,
+                log_prob=output.log_prob.item(),
+                value=output.value.item(),
+                reward=0.0,  # filled below
+                done=False,  # filled below
+                hidden=_detach(hidden),
+            )
+
+            hidden = output.hidden
+
+            # Step environment
+            gym_action = {k: int(v.item()) for k, v in output.actions.items()}
+            next_obs, reward, terminated, truncated, info = env.step(gym_action)
+
+            self.buffer.rewards[-1] = float(reward)
+            self.buffer.dones[-1] = terminated or truncated
+            ep_reward += float(reward)
+
+            obs = next_obs
+
+            if terminated or truncated:
+                episode_rewards.append(ep_reward)
+                ep_reward = 0.0
+                n_episodes += 1
+                obs, info = env.reset()
+                hidden = self.model.init_hidden(batch_size=1)
+                hidden = _to_device(hidden, self.device)
+
+        # Bootstrap value for last state
+        with torch.no_grad():
+            s, tr, m, c, am = obs_to_tensors(obs, device=self.device)
+            last_output = self.model.act(s, tr, m, c, am, hidden)
+            last_value = last_output.value.item()
+
+        self.buffer.finish(last_value)
+        env.close()
+
+        mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
+        return {
+            "mean_ep_reward": mean_reward,
+            "n_episodes": n_episodes,
+            "opponent": opp.name,
+        }
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Evaluation via league tournament
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _evaluate(self, update_idx: int) -> Dict[str, Any]:
+        """Run a mini league tournament and return summary stats."""
+        self.model.eval()
+
+        agent = MohaNetAgent(
+            name=f"MohaNet-u{update_idx}",
+            model=self.model,
+            device=str(self.device),
+        )
+        players: List[PlayerSlot] = [agent] + self.eval_opponents
+
+        league = LeagueTournament(
+            players=players,
+            matches_per_pair=self.train_cfg.eval_matches_per_pair,
+        )
+        results = league.run()
+
+        # Find our agent's stats
+        agent_stats = results.get(agent.name)
+        if agent_stats is not None:
+            win_rate = agent_stats.wins / max(agent_stats.matches_played, 1)
+            avg_crowns = agent_stats.crowns_scored / max(agent_stats.matches_played, 1)
+        else:
+            win_rate = 0.0
+            avg_crowns = 0.0
+
+        print(
+            f"  [Eval u{update_idx}] Win rate: {win_rate:.1%}, "
+            f"Avg crowns: {avg_crowns:.2f}"
+        )
+
+        return {
+            "win_rate": win_rate,
+            "avg_crowns": avg_crowns,
+            "matches": agent_stats.matches_played if agent_stats else 0,
+        }
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Checkpointing & logging
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _save_checkpoint(self, update_idx: int) -> None:
+        """Save model state dict."""
+        path = self.log_dir / f"mohanet_u{update_idx}.pt"
+        torch.save(self.model.state_dict(), path)
+        print(f"  Checkpoint saved: {path}")
+
+    def _save_metrics(self) -> None:
+        """Dump training metrics to JSON."""
+        path = self.log_dir / "metrics.json"
+        with open(path, "w") as f:
+            json.dump(self._metrics_history, f, indent=2, default=str)
+
+    def _log(self, metrics: Dict[str, Any]) -> None:
+        """Print a compact summary line."""
+        u = metrics["update"]
+        sps = metrics.get("sps", 0)
+        pl = metrics.get("policy_loss", 0)
+        vl = metrics.get("value_loss", 0)
+        ent = metrics.get("entropy", 0)
+        mr = metrics.get("mean_ep_reward", 0)
+        opp = metrics.get("opponent", "?")
+
+        print(
+            f"[u{u:4d}] sps={sps:.0f}  π={pl:.4f}  v={vl:.4f}  "
+            f"H={ent:.3f}  R={mr:.2f}  vs={opp}"
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LSTM hidden state utilities
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _to_device(hidden: LSTMState, device: torch.device) -> LSTMState:
+    return (hidden[0].to(device), hidden[1].to(device))
+
+
+def _detach(hidden: LSTMState) -> LSTMState:
+    return (hidden[0].detach().cpu(), hidden[1].detach().cpu())

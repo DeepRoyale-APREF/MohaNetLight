@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mohanetlight"
+version = "0.1.0"
+description = "AlphaStar-inspired lightweight neural network for Clash Royale RL — hierarchical PPO with transformer entity encoder."
+authors = [
+    { name = "Fabrizio Montoya" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "numpy>=1.26",
+    "clash-royale-engine>=0.1.0",
+    "clash-royale-gymnasium>=0.1.0",
+]
+
+# NOTE: PyTorch is required but NOT listed here because pip installs
+# CPU-only by default.  Install the correct build for your hardware FIRST:
+#
+#   # CPU only
+#   pip install torch>=2.1
+#
+#   # CUDA 12.4 (Linux / Windows)
+#   pip install torch>=2.1 --index-url https://download.pytorch.org/whl/cu124
+#
+#   # CUDA 12.1
+#   pip install torch>=2.1 --index-url https://download.pytorch.org/whl/cu121
+#
+#   # Apple MPS (macOS) — default pip torch includes MPS support
+#   pip install torch>=2.1
+#
+# Then install this package:
+#   pip install -e ".[dev]"
+
+[project.optional-dependencies]
+cpu = [
+    "torch>=2.1",
+]
+dev = [
+    "torch>=2.1",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.8",
+]
+
+[tool.setuptools.packages.find]
+include = ["mohanetlight*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short -ra"
+markers = ["slow: marks tests as slow"]
