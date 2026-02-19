@@ -118,7 +118,10 @@ class TrainingConfig:
     total_timesteps : int
         Total environment steps to train.
     n_steps : int
-        Steps per rollout before each PPO update.
+        Steps per rollout before each PPO update.  Must be large enough
+        for at least one full episode to complete.  At ``frame_skip=3``
+        and 30 fps a 240 s match ≈ 2 400 RL steps.  Default 2 560
+        provides headroom.
     n_epochs : int
         PPO optimisation epochs per update.
     batch_chunk_len : int
@@ -137,6 +140,9 @@ class TrainingConfig:
         Gradient clipping norm.
     lr : float
         Learning rate.
+    frame_skip : int
+        Engine frames per gym ``step()``.  Higher = faster but coarser
+        RL decisions.  At fps=30, ``frame_skip=3`` → 10 decisions/s.
     eval_interval : int
         Evaluate in league every N updates.
     eval_matches_per_pair : int
@@ -150,7 +156,7 @@ class TrainingConfig:
     """
 
     total_timesteps: int = 1_000_000
-    n_steps: int = 512
+    n_steps: int = 2560
     n_epochs: int = 4
     batch_chunk_len: int = 32
     gamma: float = 0.99
@@ -160,6 +166,7 @@ class TrainingConfig:
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
     lr: float = 3e-4
+    frame_skip: int = 3
     eval_interval: int = 20
     eval_matches_per_pair: int = 6
     checkpoint_interval: int = 50

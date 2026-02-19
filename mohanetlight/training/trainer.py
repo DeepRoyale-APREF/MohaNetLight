@@ -29,6 +29,7 @@ from mohanetlight.inference.agent import MohaNetAgent
 from mohanetlight.network.core import LSTMState
 from mohanetlight.network.mohanet import MohaNetLight
 from mohanetlight.training.ppo import PPOTrainer
+from mohanetlight.training.reward_debugger import RewardDebugger, RewardSnapshot
 from mohanetlight.training.rollout import RolloutBuffer
 from mohanetlight.utils.tensor_utils import obs_to_tensors
 
@@ -96,6 +97,13 @@ class LeagueTrainer:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._metrics_history: List[Dict[str, Any]] = []
 
+        # Reward debugger — tracks per-step and cross-rollout reward signals
+        self.reward_debugger = RewardDebugger(
+            log_dir=self.log_dir,
+            verbose=True,
+            component_tracking=True,
+        )
+
     # ──────────────────────────────────────────────────────────────────────
     # Main training loop
     # ──────────────────────────────────────────────────────────────────────
@@ -108,7 +116,9 @@ class LeagueTrainer:
 
         print(
             f"Training: {cfg.total_timesteps:,} steps, "
-            f"{total_updates} updates × {cfg.n_steps} steps each"
+            f"{total_updates} updates × {cfg.n_steps} steps each\n"
+            f"  frame_skip={cfg.frame_skip} → ~{30 // cfg.frame_skip} decisions/s, "
+            f"~{int(240 * 30 / cfg.frame_skip)} steps/match (240s max)"
         )
 
         for update_idx in range(1, total_updates + 1):
@@ -141,6 +151,7 @@ class LeagueTrainer:
             # ── 4. Checkpoint ─────────────────────────────────────────────
             if update_idx % cfg.checkpoint_interval == 0:
                 self._save_checkpoint(update_idx)
+                self.reward_debugger.save()
 
             # ── 5. Log ────────────────────────────────────────────────────
             self._log(metrics)
@@ -152,6 +163,7 @@ class LeagueTrainer:
         # Final save
         self._save_checkpoint(total_updates)
         self._save_metrics()
+        self.reward_debugger.save()
         print("Training complete.")
 
     # ──────────────────────────────────────────────────────────────────────
@@ -167,6 +179,7 @@ class LeagueTrainer:
 
         env = ClashRoyaleGymEnv(
             opponent=opp.to_player_interface(),
+            frame_skip=self.train_cfg.frame_skip,
             **self.env_kwargs,
         )
 
@@ -207,13 +220,21 @@ class LeagueTrainer:
             gym_action = {k: int(v.item()) for k, v in output.actions.items()}
             next_obs, reward, terminated, truncated, info = env.step(gym_action)
 
+            done = terminated or truncated
             self.buffer.rewards[-1] = float(reward)
-            self.buffer.dones[-1] = terminated or truncated
+            self.buffer.dones[-1] = done
             ep_reward += float(reward)
+
+            # Feed reward debugger with per-step data
+            self.reward_debugger.on_step(
+                reward=float(reward),
+                done=done,
+                info=info,
+            )
 
             obs = next_obs
 
-            if terminated or truncated:
+            if done:
                 episode_rewards.append(ep_reward)
                 ep_reward = 0.0
                 n_episodes += 1
@@ -228,13 +249,28 @@ class LeagueTrainer:
             last_value = last_output.value.item()
 
         self.buffer.finish(last_value)
+
+        # Finalise reward debug snapshot for this rollout
+        reward_snapshot = self.reward_debugger.finish_rollout()
+
         env.close()
 
-        mean_reward = float(np.mean(episode_rewards)) if episode_rewards else 0.0
+        # Use cross-rollout episode reward if available, else report rollout sum
+        cross_ep_reward = self.reward_debugger.get_mean_episode_reward()
+        mean_ep_reward = float(np.mean(episode_rewards)) if episode_rewards else cross_ep_reward
+
         return {
-            "mean_ep_reward": mean_reward,
+            "mean_ep_reward": mean_ep_reward,
             "n_episodes": n_episodes,
             "opponent": opp.name,
+            # New: actual per-step reward stats
+            "rollout_reward_sum": reward_snapshot.total,
+            "rollout_reward_mean": reward_snapshot.mean,
+            "rollout_reward_abs_mean": reward_snapshot.abs_mean,
+            "rollout_reward_nonzero_frac": reward_snapshot.nonzero_frac,
+            "rollout_reward_min": reward_snapshot.min,
+            "rollout_reward_max": reward_snapshot.max,
+            "reward_components": reward_snapshot.component_sums,
         }
 
     # ──────────────────────────────────────────────────────────────────────
@@ -295,19 +331,38 @@ class LeagueTrainer:
             json.dump(self._metrics_history, f, indent=2, default=str)
 
     def _log(self, metrics: Dict[str, Any]) -> None:
-        """Print a compact summary line."""
+        """Print a compact summary line with actual reward statistics."""
         u = metrics["update"]
         sps = metrics.get("sps", 0)
         pl = metrics.get("policy_loss", 0)
         vl = metrics.get("value_loss", 0)
         ent = metrics.get("entropy", 0)
-        mr = metrics.get("mean_ep_reward", 0)
         opp = metrics.get("opponent", "?")
+
+        # Actual per-step reward stats (not episode-gated)
+        r_sum = metrics.get("rollout_reward_sum", 0.0)
+        r_mean = metrics.get("rollout_reward_mean", 0.0)
+        r_abs = metrics.get("rollout_reward_abs_mean", 0.0)
+        r_nz = metrics.get("rollout_reward_nonzero_frac", 0.0)
+        n_eps = metrics.get("n_episodes", 0)
+        mr = metrics.get("mean_ep_reward", 0.0)
 
         print(
             f"[u{u:4d}] sps={sps:.0f}  π={pl:.4f}  v={vl:.4f}  "
-            f"H={ent:.3f}  R={mr:.2f}  vs={opp}"
+            f"H={ent:.3f}  ΣR={r_sum:+.3f}  μR={r_mean:+.5f}  "
+            f"|R|={r_abs:.5f}  nz={r_nz:.0%}  ep={n_eps}  "
+            f"epR={mr:+.3f}  vs={opp}"
         )
+
+        # Print per-component breakdown every 5 updates
+        components = metrics.get("reward_components", {})
+        if components and u % 5 == 0:
+            parts = "  ".join(f"{k}={v:+.4f}" for k, v in components.items())
+            print(f"        [components] {parts}")
+
+        # Print full diagnosis periodically (every 10 updates or first 3)
+        if u <= 3 or u % 10 == 0:
+            print(self.reward_debugger.diagnose(u))
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
