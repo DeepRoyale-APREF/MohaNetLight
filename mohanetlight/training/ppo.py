@@ -84,13 +84,14 @@ class PPOTrainer:
         scalars = chunk["scalars"]  # (T, 16)
         troops = chunk["troops"]    # (T, 100, 14)
         troop_mask = chunk["troop_mask"]  # (T, 100)
-        cards = chunk["cards"]      # (T, 4, 4)
+        cards = chunk["cards"]      # (T, 8, 5)
         action_masks: Dict[str, Tensor] = chunk["action_masks"]  # type: ignore[assignment]
         actions: Dict[str, Tensor] = chunk["actions"]  # type: ignore[assignment]
         old_log_probs = chunk["old_log_probs"]  # (T,)
         advantages = chunk["advantages"]  # (T,)
         returns = chunk["returns"]  # (T,)
         hidden: LSTMState = chunk["hidden"]  # type: ignore[assignment]
+        dones: Tensor = chunk["dones"]  # (T,) bool  # type: ignore[assignment]
 
         T = scalars.shape[0]
 
@@ -106,11 +107,17 @@ class PPOTrainer:
 
         h = hidden
         for t in range(T):
+            # Reset LSTM hidden state at episode boundaries
+            # (if previous step was done, this is a new episode)
+            if t > 0 and dones[t - 1]:
+                h = self.model.init_hidden(batch_size=1)
+                h = (h[0].to(self.device), h[1].to(self.device))
+
             # Slice single timestep — add batch dim
             s_t = scalars[t].unsqueeze(0)       # (1, 16)
             tr_t = troops[t].unsqueeze(0)       # (1, 100, 14)
             m_t = troop_mask[t].unsqueeze(0)    # (1, 100)
-            c_t = cards[t].unsqueeze(0)         # (1, 4, 4)
+            c_t = cards[t].unsqueeze(0)         # (1, 8, 5)
 
             am_t = {k: v[t].unsqueeze(0) for k, v in action_masks.items()}
             a_t = {k: v[t].unsqueeze(0) for k, v in actions.items()}

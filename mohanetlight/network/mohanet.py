@@ -156,9 +156,9 @@ class MohaNetLight(nn.Module):
         scalars : Tensor  ``(B, 16)``
         troops : Tensor   ``(B, 100, 14)``
         troop_mask : Tensor ``(B, 100)``
-        cards : Tensor     ``(B, 4, 4)``
+        cards : Tensor     ``(B, 8, 5)``
         action_masks : Dict[str, Tensor]
-            ``strategy (B,3)  card (B,5)  tile_x (B,18)  tile_y (B,32)``
+            ``strategy (B,3)  card (B,9)  tile_x_per_card (B,9,18)  tile_y_per_card (B,9,32)``
         actions : Dict[str, Tensor]
             ``strategy (B,)  card (B,)  tile_x (B,)  tile_y (B,)``
         hidden : LSTMState
@@ -191,17 +191,21 @@ class MohaNetLight(nn.Module):
         )
         card_emb = self.card_embed(actions["card"])
 
-        # ── Tile X ───────────────────────────────────────────────────────
+        # ── Tile X (per-card mask) ───────────────────────────────────────
+        B = core_out.size(0)
+        card_action = actions["card"]
+        tx_mask = action_masks["tile_x_per_card"][torch.arange(B, device=card_action.device), card_action]
         tx_logits = self.tile_x_head(core_out, card_emb, entity_ctx)
         tx_out = masked_categorical(
-            tx_logits, action_masks["tile_x"], action=actions["tile_x"],
+            tx_logits, tx_mask, action=actions["tile_x"],
         )
         tx_emb = self.tile_x_embed(actions["tile_x"])
 
-        # ── Tile Y ───────────────────────────────────────────────────────
+        # ── Tile Y (per-card mask) ───────────────────────────────────────
+        ty_mask = action_masks["tile_y_per_card"][torch.arange(B, device=card_action.device), card_action]
         ty_logits = self.tile_y_head(core_out, tx_emb, entity_ctx)
         ty_out = masked_categorical(
-            ty_logits, action_masks["tile_y"], action=actions["tile_y"],
+            ty_logits, ty_mask, action=actions["tile_y"],
         )
 
         # ── Aggregated log-prob & entropy ────────────────────────────────
@@ -237,7 +241,7 @@ class MohaNetLight(nn.Module):
         scalars : Tensor  ``(B, 16)``
         troops : Tensor   ``(B, 100, 14)``
         troop_mask : Tensor ``(B, 100)``
-        cards : Tensor     ``(B, 4, 4)``
+        cards : Tensor     ``(B, 8, 5)``
         action_masks : Dict[str, Tensor]
         hidden : LSTMState
 
@@ -251,6 +255,8 @@ class MohaNetLight(nn.Module):
         core_out, new_hidden = self.core(concat.unsqueeze(1), hidden)
         core_out = core_out.squeeze(1)
 
+        B = core_out.size(0)
+
         # Autoregressive sampling
         strat_logits = self.strategy_head(core_out)
         strat_out = masked_categorical(strat_logits, action_masks["strategy"])
@@ -260,12 +266,16 @@ class MohaNetLight(nn.Module):
         card_out = masked_categorical(card_logits, action_masks["card"])
         card_emb = self.card_embed(card_out.action)
 
+        # Per-card tile masks
+        card_action = card_out.action
+        tx_mask = action_masks["tile_x_per_card"][torch.arange(B, device=card_action.device), card_action]
         tx_logits = self.tile_x_head(core_out, card_emb, entity_ctx)
-        tx_out = masked_categorical(tx_logits, action_masks["tile_x"])
+        tx_out = masked_categorical(tx_logits, tx_mask)
         tx_emb = self.tile_x_embed(tx_out.action)
 
+        ty_mask = action_masks["tile_y_per_card"][torch.arange(B, device=card_action.device), card_action]
         ty_logits = self.tile_y_head(core_out, tx_emb, entity_ctx)
-        ty_out = masked_categorical(ty_logits, action_masks["tile_y"])
+        ty_out = masked_categorical(ty_logits, ty_mask)
 
         actions = {
             "strategy": strat_out.action,

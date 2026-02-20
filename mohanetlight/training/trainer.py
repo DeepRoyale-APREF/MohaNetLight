@@ -171,7 +171,7 @@ class LeagueTrainer:
     # ──────────────────────────────────────────────────────────────────────
 
     def _collect_rollout(self) -> Dict[str, float]:
-        """Collect ``n_steps`` transitions into the rollout buffer."""
+        """Collect at least ``n_steps`` transitions, always finishing full episodes."""
         # Pick a random training opponent for this rollout
         opp_idx = int(self._rng.integers(len(self.training_opponents)))
         opp = self.training_opponents[opp_idx]
@@ -192,8 +192,10 @@ class LeagueTrainer:
         episode_rewards: List[float] = []
         ep_reward = 0.0
         n_episodes = 0
+        step = 0
 
-        for _step in range(self.train_cfg.n_steps):
+        # Keep collecting until we have enough steps AND are at an episode boundary
+        while step < self.train_cfg.n_steps or (step > 0 and not self.buffer.dones[-1]):
             scalars, troops, troop_mask, cards, action_masks = obs_to_tensors(
                 obs, device=self.device,
             )
@@ -233,6 +235,7 @@ class LeagueTrainer:
             )
 
             obs = next_obs
+            step += 1
 
             if done:
                 episode_rewards.append(ep_reward)
@@ -294,11 +297,11 @@ class LeagueTrainer:
         )
         results = league.run()
 
-        # Find our agent's stats
-        agent_stats = results.get(agent.name)
+        # Find our agent's stats (stored in league.stats, keyed by name)
+        agent_stats = league.stats.get(agent.name)
         if agent_stats is not None:
-            win_rate = agent_stats.wins / max(agent_stats.matches_played, 1)
-            avg_crowns = agent_stats.crowns_scored / max(agent_stats.matches_played, 1)
+            win_rate = agent_stats.wins / max(agent_stats.total_matches, 1)
+            avg_crowns = agent_stats.total_towers_destroyed / max(agent_stats.total_matches, 1)
         else:
             win_rate = 0.0
             avg_crowns = 0.0
@@ -311,7 +314,7 @@ class LeagueTrainer:
         return {
             "win_rate": win_rate,
             "avg_crowns": avg_crowns,
-            "matches": agent_stats.matches_played if agent_stats else 0,
+            "matches": agent_stats.total_matches if agent_stats else 0,
         }
 
     # ──────────────────────────────────────────────────────────────────────

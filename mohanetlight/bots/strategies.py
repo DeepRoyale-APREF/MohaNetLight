@@ -64,7 +64,9 @@ def _weakest_enemy_lane(state: State) -> str:
     """Return ``"left"`` or ``"right"`` based on lowest enemy princess HP."""
     left_hp = state.numbers.left_enemy_princess_hp
     right_hp = state.numbers.right_enemy_princess_hp
-    return "left" if left_hp <= right_hp else "right"
+    if left_hp == right_hp:
+        return random.choice(["left", "right"])
+    return "left" if left_hp < right_hp else "right"
 
 
 def _lane_x(lane: str, rng: random.Random) -> int:

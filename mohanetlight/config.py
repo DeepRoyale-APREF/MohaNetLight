@@ -19,11 +19,11 @@ class ModelConfig:
     troop_feature_dim : int
         Per-entity feature dimension from cr-gym observation.
     card_feature_dim : int
-        Per-hand-card feature dimension.
+        Per-deck-card feature dimension.
     max_troops : int
         Max padded entities in the observation array.
-    hand_size : int
-        Number of hand cards (always 4 in Clash Royale).
+    deck_size : int
+        Number of cards in the deck (8 in Clash Royale).
 
     Encoder
     -------
@@ -61,7 +61,7 @@ class ModelConfig:
     n_strategies : int
         Number of strategy options (AGGRESSIVE, DEFENSIVE, FARMING).
     n_card_options : int
-        Hand slots (4) + noop (1) = 5.
+        Deck cards (8) + noop (1) = 9.
     n_tile_x : int
         Number of tile columns.
     n_tile_y : int
@@ -71,9 +71,9 @@ class ModelConfig:
     # Input dims (from cr-gym)
     scalar_dim: int = 16
     troop_feature_dim: int = 14
-    card_feature_dim: int = 4
+    card_feature_dim: int = 5
     max_troops: int = 100
-    hand_size: int = 4
+    deck_size: int = 8
 
     # Encoder dims
     encoder_dim: int = 128
@@ -94,7 +94,7 @@ class ModelConfig:
 
     # Action space sizes
     n_strategies: int = 3
-    n_card_options: int = 5   # 4 hand + noop
+    n_card_options: int = 9   # 8 deck + noop
     n_tile_x: int = 18
     n_tile_y: int = 32
 

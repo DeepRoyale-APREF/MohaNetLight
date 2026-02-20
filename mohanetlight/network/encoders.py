@@ -193,11 +193,11 @@ class EntityEncoder(nn.Module):
 
 
 class CardEncoder(nn.Module):
-    """Encoder for the 4 hand cards.
+    """Encoder for the 8 deck cards.
 
     Architecture::
 
-        Shared Linear(4 → 32) per card → concat 4 → (128) → Linear → ReLU → (128)
+        Shared Linear(5 → 32) per card → concat 8 → (256) → Linear → ReLU → (128)
 
     Parameters
     ----------
@@ -215,19 +215,19 @@ class CardEncoder(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # Aggregate 4 cards → encoder_dim
+        # Aggregate 8 cards → encoder_dim
         self.aggregate = nn.Sequential(
-            nn.Linear(h * cfg.hand_size, cfg.encoder_dim),
+            nn.Linear(h * cfg.deck_size, cfg.encoder_dim),
             nn.ReLU(inplace=True),
         )
 
     def forward(self, cards: Tensor) -> Tensor:
-        """Encode hand cards.
+        """Encode deck cards.
 
         Parameters
         ----------
         cards : Tensor
-            Shape ``(B, 4, 4)`` — 4 hand cards × 4 features each.
+            Shape ``(B, 8, 5)`` — 8 deck cards × 5 features each.
 
         Returns
         -------
@@ -235,6 +235,6 @@ class CardEncoder(nn.Module):
             Shape ``(B, encoder_dim)``.
         """
         B, H, _ = cards.shape
-        per_card = self.card_proj(cards)  # (B, 4, 32)
-        flat = per_card.reshape(B, -1)    # (B, 128)
+        per_card = self.card_proj(cards)  # (B, 8, 32)
+        flat = per_card.reshape(B, -1)    # (B, 256)
         return self.aggregate(flat)        # (B, encoder_dim)

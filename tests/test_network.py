@@ -40,12 +40,12 @@ def batch_tensors(cfg: ModelConfig):
     troops = torch.randn(B, cfg.max_troops, cfg.troop_feature_dim).abs()
     troop_mask = torch.zeros(B, cfg.max_troops, dtype=torch.bool)
     troop_mask[:, :10] = True  # 10 active troops
-    cards = torch.randn(B, cfg.hand_size, cfg.card_feature_dim).abs()
+    cards = torch.randn(B, cfg.deck_size, cfg.card_feature_dim).abs()
     action_masks = {
         "strategy": torch.ones(B, cfg.n_strategies, dtype=torch.bool),
         "card": torch.ones(B, cfg.n_card_options, dtype=torch.bool),
-        "tile_x": torch.ones(B, cfg.n_tile_x, dtype=torch.bool),
-        "tile_y": torch.ones(B, cfg.n_tile_y, dtype=torch.bool),
+        "tile_x_per_card": torch.ones(B, cfg.n_card_options, cfg.n_tile_x, dtype=torch.bool),
+        "tile_y_per_card": torch.ones(B, cfg.n_card_options, cfg.n_tile_y, dtype=torch.bool),
     }
     return scalars, troops, troop_mask, cards, action_masks
 
@@ -121,7 +121,7 @@ class TestEntityEncoder:
 class TestCardEncoder:
     def test_output_shape(self, cfg: ModelConfig):
         enc = CardEncoder(cfg)
-        x = torch.randn(3, cfg.hand_size, cfg.card_feature_dim)
+        x = torch.randn(3, cfg.deck_size, cfg.card_feature_dim)
         out = enc(x)
         assert out.shape == (3, cfg.encoder_dim)
 
@@ -259,12 +259,12 @@ class TestMohaNetLight:
         troops = torch.randn(1, cfg.max_troops, cfg.troop_feature_dim).abs()
         troop_mask = torch.zeros(1, cfg.max_troops, dtype=torch.bool)
         troop_mask[0, :3] = True
-        cards = torch.randn(1, cfg.hand_size, cfg.card_feature_dim).abs()
+        cards = torch.randn(1, cfg.deck_size, cfg.card_feature_dim).abs()
         action_masks = {
             "strategy": torch.ones(1, cfg.n_strategies, dtype=torch.bool),
             "card": torch.ones(1, cfg.n_card_options, dtype=torch.bool),
-            "tile_x": torch.ones(1, cfg.n_tile_x, dtype=torch.bool),
-            "tile_y": torch.ones(1, cfg.n_tile_y, dtype=torch.bool),
+            "tile_x_per_card": torch.ones(1, cfg.n_card_options, cfg.n_tile_x, dtype=torch.bool),
+            "tile_y_per_card": torch.ones(1, cfg.n_card_options, cfg.n_tile_y, dtype=torch.bool),
         }
         hidden = model.init_hidden(1)
         output = model.act(scalars, troops, troop_mask, cards, action_masks, hidden)
@@ -293,12 +293,12 @@ class TestMohaNetLight:
         troops = torch.randn(1, cfg.max_troops, cfg.troop_feature_dim).abs()
         troop_mask = torch.zeros(1, cfg.max_troops, dtype=torch.bool)
         troop_mask[0, :2] = True
-        cards = torch.randn(1, cfg.hand_size, cfg.card_feature_dim).abs()
+        cards = torch.randn(1, cfg.deck_size, cfg.card_feature_dim).abs()
         action_masks = {
             "strategy": torch.ones(1, cfg.n_strategies, dtype=torch.bool),
             "card": torch.ones(1, cfg.n_card_options, dtype=torch.bool),
-            "tile_x": torch.ones(1, cfg.n_tile_x, dtype=torch.bool),
-            "tile_y": torch.ones(1, cfg.n_tile_y, dtype=torch.bool),
+            "tile_x_per_card": torch.ones(1, cfg.n_card_options, cfg.n_tile_x, dtype=torch.bool),
+            "tile_y_per_card": torch.ones(1, cfg.n_card_options, cfg.n_tile_y, dtype=torch.bool),
         }
 
         h0 = model.init_hidden(1)
@@ -315,23 +315,23 @@ class TestMohaNetLight:
         troops = torch.randn(B, cfg.max_troops, cfg.troop_feature_dim).abs()
         troop_mask = torch.zeros(B, cfg.max_troops, dtype=torch.bool)
         troop_mask[:, :5] = True
-        cards = torch.randn(B, cfg.hand_size, cfg.card_feature_dim).abs()
+        cards = torch.randn(B, cfg.deck_size, cfg.card_feature_dim).abs()
 
-        # Only strategy 0 and card 4 (noop) are valid
+        # Only strategy 0 and card 8 (noop) are valid
         action_masks = {
             "strategy": torch.zeros(B, cfg.n_strategies, dtype=torch.bool),
             "card": torch.zeros(B, cfg.n_card_options, dtype=torch.bool),
-            "tile_x": torch.ones(B, cfg.n_tile_x, dtype=torch.bool),
-            "tile_y": torch.ones(B, cfg.n_tile_y, dtype=torch.bool),
+            "tile_x_per_card": torch.ones(B, cfg.n_card_options, cfg.n_tile_x, dtype=torch.bool),
+            "tile_y_per_card": torch.ones(B, cfg.n_card_options, cfg.n_tile_y, dtype=torch.bool),
         }
         action_masks["strategy"][:, 0] = True
-        action_masks["card"][:, 4] = True  # noop only
+        action_masks["card"][:, 8] = True  # noop only
 
         hidden = model.init_hidden(B)
         output = model.act(scalars, troops, troop_mask, cards, action_masks, hidden)
 
         assert (output.actions["strategy"] == 0).all()
-        assert (output.actions["card"] == 4).all()
+        assert (output.actions["card"] == 8).all()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -351,15 +351,15 @@ class TestRolloutBuffer:
                 "scalars": np.zeros(16, dtype=np.float32),
                 "troops": np.zeros((100, 14), dtype=np.float32),
                 "troop_mask": np.zeros(100, dtype=bool),
-                "cards": np.zeros((4, 4), dtype=np.float32),
+                "cards": np.zeros((8, 5), dtype=np.float32),
                 "action_mask": {
                     "strategy": np.ones(3, dtype=bool),
-                    "card": np.ones(5, dtype=bool),
-                    "tile_x": np.ones(18, dtype=bool),
-                    "tile_y": np.ones(32, dtype=bool),
+                    "card": np.ones(9, dtype=bool),
+                    "tile_x_per_card": np.ones((9, 18), dtype=bool),
+                    "tile_y_per_card": np.ones((9, 32), dtype=bool),
                 },
             }
-            action = {"strategy": 0, "card": 4, "tile_x": 9, "tile_y": 15}
+            action = {"strategy": 0, "card": 8, "tile_x": 9, "tile_y": 15}
             buf.add(obs, action, log_prob=-1.0, value=0.5, reward=1.0,
                     done=False, hidden=hidden)
 
@@ -410,12 +410,15 @@ class TestRolloutBuffer:
                 "scalars": np.zeros(16, dtype=np.float32),
                 "troops": np.zeros((100, 14), dtype=np.float32),
                 "troop_mask": np.zeros(100, dtype=bool),
-                "cards": np.zeros((4, 4), dtype=np.float32),
-                "action_mask": {k: np.ones(s, dtype=bool)
-                    for k, s in [("strategy", 3), ("card", 5),
-                                  ("tile_x", 18), ("tile_y", 32)]},
+                "cards": np.zeros((8, 5), dtype=np.float32),
+                "action_mask": {
+                    "strategy": np.ones(3, dtype=bool),
+                    "card": np.ones(9, dtype=bool),
+                    "tile_x_per_card": np.ones((9, 18), dtype=bool),
+                    "tile_y_per_card": np.ones((9, 32), dtype=bool),
+                },
             }
-            buf.add(obs, {"strategy": 0, "card": 4, "tile_x": 0, "tile_y": 0},
+            buf.add(obs, {"strategy": 0, "card": 8, "tile_x": 0, "tile_y": 0},
                     -1.0, 0.0, 0.0, False, hidden)
 
         buf.finish(0.0)
@@ -437,19 +440,19 @@ class TestTensorUtils:
             "scalars": np.random.randn(16).astype(np.float32),
             "troops": np.random.randn(100, 14).astype(np.float32),
             "troop_mask": np.zeros(100, dtype=bool),
-            "cards": np.random.randn(4, 4).astype(np.float32),
+            "cards": np.random.randn(8, 5).astype(np.float32),
             "action_mask": {
                 "strategy": np.ones(3, dtype=bool),
-                "card": np.ones(5, dtype=bool),
-                "tile_x": np.ones(18, dtype=bool),
-                "tile_y": np.ones(32, dtype=bool),
+                "card": np.ones(9, dtype=bool),
+                "tile_x_per_card": np.ones((9, 18), dtype=bool),
+                "tile_y_per_card": np.ones((9, 32), dtype=bool),
             },
         }
         scalars, troops, troop_mask, cards, masks = obs_to_tensors(obs)
         assert scalars.shape == (1, 16)
         assert troops.shape == (1, 100, 14)
         assert troop_mask.shape == (1, 100)
-        assert cards.shape == (1, 4, 4)
+        assert cards.shape == (1, 8, 5)
         assert masks["strategy"].shape == (1, 3)
 
     def test_batch_obs(self):
@@ -461,17 +464,17 @@ class TestTensorUtils:
                 "scalars": np.random.randn(16).astype(np.float32),
                 "troops": np.random.randn(100, 14).astype(np.float32),
                 "troop_mask": np.zeros(100, dtype=bool),
-                "cards": np.random.randn(4, 4).astype(np.float32),
+                "cards": np.random.randn(8, 5).astype(np.float32),
                 "action_mask": {
                     "strategy": np.ones(3, dtype=bool),
-                    "card": np.ones(5, dtype=bool),
-                    "tile_x": np.ones(18, dtype=bool),
-                    "tile_y": np.ones(32, dtype=bool),
+                    "card": np.ones(9, dtype=bool),
+                    "tile_x_per_card": np.ones((9, 18), dtype=bool),
+                    "tile_y_per_card": np.ones((9, 32), dtype=bool),
                 },
             })
         scalars, troops, troop_mask, cards, masks = batch_obs(obs_list)
         assert scalars.shape == (3, 16)
-        assert masks["card"].shape == (3, 5)
+        assert masks["card"].shape == (3, 9)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

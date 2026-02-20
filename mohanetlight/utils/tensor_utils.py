@@ -20,7 +20,7 @@ def obs_to_tensors(
     obs : dict
         Gymnasium Dict observation with keys:
         ``troops (100,14)``, ``troop_mask (100,)``, ``scalars (16,)``,
-        ``cards (4,4)``, ``action_mask {strategy, card, tile_x, tile_y}``.
+        ``cards (8,5)``, ``action_mask {strategy, card, tile_x_per_card, tile_y_per_card}``.
     device : str | torch.device
         Target device.
 
@@ -29,9 +29,9 @@ def obs_to_tensors(
     scalars : Tensor ``(1, 16)``
     troops : Tensor ``(1, 100, 14)``
     troop_mask : Tensor ``(1, 100)`` bool
-    cards : Tensor ``(1, 4, 4)``
+    cards : Tensor ``(1, 8, 5)``
     action_masks : dict[str, Tensor]
-        Each ``(1, K)`` bool tensor.
+        Each mask is unsqueezed to add a batch dim.
     """
     scalars = torch.as_tensor(obs["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
     troops = torch.as_tensor(obs["troops"], dtype=torch.float32, device=device).unsqueeze(0)
@@ -72,7 +72,7 @@ def batch_obs(
 
     mask_keys = list(obs_list[0]["action_mask"].keys())
     action_masks: Dict[str, Tensor] = {
-        k: torch.zeros(n, obs_list[0]["action_mask"][k].shape[0], dtype=torch.bool, device=device)
+        k: torch.zeros(n, *np.array(obs_list[0]["action_mask"][k]).shape, dtype=torch.bool, device=device)
         for k in mask_keys
     }
 
@@ -178,14 +178,25 @@ def state_to_obs_tensors(
         max(0.0, 1.0 - n.time_remaining / 180.0),  # approx frame_ratio
     ], dtype=np.float32)
 
-    # ── Cards ─────────────────────────────────────────────────────────────
-    cards_arr = np.zeros((4, 4), dtype=np.float32)
-    for i, card in enumerate(state.cards[:4]):
+    # ── Cards (all 8 deck cards with hand/affordability) ────────────────
+    deck = state.deck if state.deck else [c.name for c in state.cards]
+    hand_names = [c.name for c in state.cards]
+    ready_set = set(state.ready)
+
+    cards_arr = np.zeros((8, 5), dtype=np.float32)
+    for i, deck_card_name in enumerate(deck[:8]):
+        s = CARD_STATS.get(deck_card_name, {})
+        is_in_hand = deck_card_name in hand_names
+        is_affordable = False
+        if is_in_hand:
+            hand_slot = hand_names.index(deck_card_name)
+            is_affordable = hand_slot in ready_set
         cards_arr[i] = [
-            _CARD_IDX.get(card.name, 0),
-            card.cost / 10.0,
-            float(card.is_spell),
-            float(i in state.ready),
+            _CARD_IDX.get(deck_card_name, 0) / 8.0,
+            s.get("elixir", 0) / 10.0,
+            float(s.get("is_spell", False)),
+            float(is_in_hand),
+            float(is_affordable),
         ]
 
     # ── Action masks ──────────────────────────────────────────────────────
@@ -207,8 +218,8 @@ def state_to_obs_tensors(
         "action_mask": {
             "strategy": masks.strategy,
             "card": masks.card,
-            "tile_x": masks.tile_x,
-            "tile_y": masks.tile_y,
+            "tile_x_per_card": masks.tile_x_per_card,
+            "tile_y_per_card": masks.tile_y_per_card,
         },
     }
     return obs_to_tensors(obs, device)

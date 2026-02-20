@@ -227,6 +227,9 @@ class RolloutBuffer:
                 "advantages": advantages_t,
                 "returns": returns_t,
                 "hidden": hidden,
+                "dones": torch.tensor(
+                    self.dones[start:end], dtype=torch.bool, device=device,
+                ),
             }
 
     def reset(self) -> None:

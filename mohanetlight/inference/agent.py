@@ -57,7 +57,7 @@ class MohaNetAgent(PlayerSlot):
         Returns
         -------
         tuple[int, int, int] or None
-            ``(tile_x, tile_y, card_idx)`` for a placement, or
+            ``(tile_x, tile_y, hand_slot)`` for a placement, or
             ``None`` for a noop (no card played this frame).
         """
         if self._hidden is None:
@@ -74,13 +74,26 @@ class MohaNetAgent(PlayerSlot):
         actions = output.actions
         card_idx = int(actions["card"].item())
 
-        # NOOP_IDX = 4 means "do nothing"
-        if card_idx == 4:
+        # NOOP_IDX = 8 means "do nothing"
+        if card_idx == 8:
+            return None
+
+        # Convert deck_idx → hand_slot
+        deck = state.deck if state.deck else [c.name for c in state.cards]
+        hand_names = [c.name for c in state.cards]
+
+        if card_idx < len(deck):
+            card_name = deck[card_idx]
+            if card_name in hand_names:
+                hand_slot = hand_names.index(card_name)
+            else:
+                return None  # card not in hand, treat as noop
+        else:
             return None
 
         tile_x = int(actions["tile_x"].item())
         tile_y = int(actions["tile_y"].item())
-        return (tile_x, tile_y, card_idx)
+        return (tile_x, tile_y, hand_slot)
 
     def reset(self) -> None:
         """Called before each match — clear LSTM hidden state."""
