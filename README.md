@@ -177,8 +177,8 @@ MohaNetlight/
 ```
 ┌─────────────┐  ┌──────────────────┐  ┌─────────────┐
 │   Scalars   │  │     Entities     │  │    Cards    │
-│  MLP 16→128 │  │ Transformer L=2  │  │  MLP 4→128  │
-│             │  │  H=4, d=64       │  │  (×4 cards) │
+│  MLP 16→128 │  │ Transformer L=2  │  │  MLP 5→128  │
+│             │  │  H=4, d=64       │  │  (×8 cards) │
 │             │  │ + Pos. Encoding   │  │             │
 └──────┬──────┘  └────────┬─────────┘  └──────┬──────┘
        │                  │                    │
@@ -191,16 +191,11 @@ MohaNetlight/
                   │ 256
     ┌─────────────┼─────────────────────────┐
     │             │                         │
-    │   ┌─────────▼─────────┐               │
-    │   │  Strategy Head    │               │
-    │   │  256→128→3        │               │
-    │   └────────┬──────────┘               │
-    │            │ embed(3→64)              │
-    │   ┌────────▼──────────┐               │
-    │   │  Card Head        │←── entity ctx │
-    │   │  448→128→5        │               │
-    │   └────────┬──────────┘               │
-    │            │ embed(5→64)              │
+    │   ┌─────────▼──────────┐              │
+    │   │  Card Head         │←── entity ctx│
+    │   │  384→128→9         │              │
+    │   └────────┬───────────┘              │
+    │            │ embed(9→64)              │
     │   ┌────────▼──────────┐               │
     │   │  Tile X Head      │←── entity ctx │
     │   │  448→128→18       │               │
@@ -213,7 +208,7 @@ MohaNetlight/
     │            │                          │
     │   ┌────────▼──────────┐    ┌──────────▼───┐
     │   │  Acciones (π)     │    │  Value Head  │
-    │   │  {strat,card,x,y} │    │  256→128→1   │
+    │   │  {card, x, y}     │    │  256→128→1   │
     │   └───────────────────┘    └──────────────┘
 ```
 
@@ -223,20 +218,19 @@ MohaNetlight/
 |--------|-------------|------------|
 | `ScalarEncoder` | MLP 16→64→128 (elixir, torres, tiempo, flags) | ~9K |
 | `EntityEncoder` | Transformer 2 capas, 4 cabezas, d=64 + codificación posicional | ~112K |
-| `CardEncoder` | MLP compartido por carta 4→32, agregado 128→128 | ~17K |
+| `CardEncoder` | MLP compartido por carta 5→32, agregado 256→128 | ~17K |
 | `LSTMCore` | LSTM(384→256, 2 capas, dropout=0.1) | ~1.18M |
-| Cabezas jerárquicas | Strategy→Card→TileX→TileY con embeddings autoregresivos | ~253K |
+| Cabezas jerárquicas | Card→TileX→TileY con embeddings autorregresivos | ~200K |
 | `ValueHead` | MLP 256→128→64→1 (crítico) | ~41K |
-| **Total** | | **1,615,355** |
+| **Total** | | **~1.56M** |
 
-### Cabezas autoregresivas
+### Cabezas autorregresivas
 
 Cada cabeza recibe como contexto adicional el **embedding de la acción muestreada** de la cabeza anterior, más el **contexto de entidades** (skip connection del encoder):
 
-1. **Strategy** ← salida LSTM
-2. **Card** ← LSTM + embed(strategy) + entity_ctx
-3. **Tile X** ← LSTM + embed(card) + entity_ctx  
-4. **Tile Y** ← LSTM + embed(tile_x) + entity_ctx
+1. **Card** ← salida LSTM + entity_ctx
+2. **Tile X** ← LSTM + embed(card) + entity_ctx  
+3. **Tile Y** ← LSTM + embed(tile_x) + entity_ctx
 
 ---
 
@@ -275,16 +269,15 @@ troop_mask = torch.zeros(B, 100, dtype=torch.bool)
 troop_mask[0, :5] = True
 cards      = torch.randn(B, 4, 4).abs()
 action_masks = {
-    "strategy": torch.ones(B, 3,  dtype=torch.bool),
-    "card":     torch.ones(B, 5,  dtype=torch.bool),
-    "tile_x":   torch.ones(B, 18, dtype=torch.bool),
-    "tile_y":   torch.ones(B, 32, dtype=torch.bool),
+    "card":     torch.ones(B, 9,  dtype=torch.bool),
+    "tile_x_per_card": torch.ones(B, 9, 18, dtype=torch.bool),
+    "tile_y_per_card": torch.ones(B, 9, 32, dtype=torch.bool),
 }
 
 hidden = model.init_hidden(B)
 output = model.act(scalars, troops, troop_mask, cards, action_masks, hidden)
 
-print(output.actions)   # {strategy, card, tile_x, tile_y} — cada uno Tensor(B,)
+print(output.actions)   # {card, tile_x, tile_y} — cada uno Tensor(B,)
 print(output.value)     # V(s) — estimación del crítico
 print(output.log_prob)  # log π(a|s)
 ```

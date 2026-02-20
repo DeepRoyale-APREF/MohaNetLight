@@ -52,14 +52,12 @@ class ModelConfig:
     head_hidden_dim : int
         Hidden dimension inside action heads.
     embedding_dim : int
-        Dimension of sampled-action embeddings (strategy, card, tile_x).
+        Dimension of sampled-action embeddings (card, tile_x).
     embedding_proj_dim : int
         Projected embedding dimension fed to next head.
 
     Action Space
     ------------
-    n_strategies : int
-        Number of strategy options (AGGRESSIVE, DEFENSIVE, FARMING).
     n_card_options : int
         Deck cards (8) + noop (1) = 9.
     n_tile_x : int
@@ -93,7 +91,6 @@ class ModelConfig:
     embedding_proj_dim: int = 64
 
     # Action space sizes
-    n_strategies: int = 3
     n_card_options: int = 9   # 8 deck + noop
     n_tile_x: int = 18
     n_tile_y: int = 32
@@ -104,8 +101,13 @@ class ModelConfig:
         return self.encoder_dim * 3
 
     @property
+    def card_head_input_dim(self) -> int:
+        """Input to card head: core + entity_context (no strategy embedding)."""
+        return self.lstm_hidden_dim + self.encoder_dim
+
+    @property
     def head_input_dim(self) -> int:
-        """Input to card/tile heads: core + prev_embedding + entity_context."""
+        """Input to tile heads: core + prev_embedding + entity_context."""
         return self.lstm_hidden_dim + self.embedding_proj_dim + self.encoder_dim
 
 
@@ -118,10 +120,9 @@ class TrainingConfig:
     total_timesteps : int
         Total environment steps to train.
     n_steps : int
-        Steps per rollout before each PPO update.  Must be large enough
-        for at least one full episode to complete.  At ``frame_skip=3``
-        and 30 fps a 240 s match ≈ 2 400 RL steps.  Default 2 560
-        provides headroom.
+        Steps per rollout before each PPO update.  At ``frame_skip=30``
+        and 30 fps a 180 s match ≈ 180 RL steps.  Default 2 560 covers
+        ~14 full matches per rollout update.
     n_epochs : int
         PPO optimisation epochs per update.
     batch_chunk_len : int
@@ -142,7 +143,9 @@ class TrainingConfig:
         Learning rate.
     frame_skip : int
         Engine frames per gym ``step()``.  Higher = faster but coarser
-        RL decisions.  At fps=30, ``frame_skip=3`` → 10 decisions/s.
+        RL decisions.  At fps=30, ``frame_skip=30`` → 1 decision/s
+        (≈180 RL steps/match), enabling years of simulated game-time
+        per wall-clock week of training.
     eval_interval : int
         Evaluate in league every N updates.
     eval_matches_per_pair : int
@@ -166,8 +169,8 @@ class TrainingConfig:
     ent_coef: float = 0.01
     max_grad_norm: float = 0.5
     lr: float = 3e-4
-    frame_skip: int = 3
-    eval_interval: int = 20
+    frame_skip: int = 10
+    eval_interval: int = 200
     eval_matches_per_pair: int = 6
     checkpoint_interval: int = 50
     log_dir: str = "./logs/mohanet"

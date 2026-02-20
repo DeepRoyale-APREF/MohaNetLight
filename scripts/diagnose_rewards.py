@@ -29,7 +29,6 @@ def main() -> None:
         # Random masked action
         mask = obs["action_mask"]
         action = {
-            "strategy": int(np.random.choice(np.where(mask["strategy"])[0])),
             "card": int(np.random.choice(np.where(mask["card"])[0])),
             "tile_x": int(np.random.choice(np.where(mask["tile_x"])[0])),
             "tile_y": int(np.random.choice(np.where(mask["tile_y"])[0])),

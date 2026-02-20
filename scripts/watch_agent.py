@@ -6,7 +6,7 @@ reward and action overlays.
 Shows the full Clash Royale GUI with a debug panel on the right displaying:
   • Per-step reward and cumulative episode reward
   • Per-component reward breakdown (colour-coded bars)
-  • Agent's chosen action (strategy, card, tile position)
+  • Agent's chosen action (card, tile position)
   • Critic value estimate V(s)
   • Tower HP deltas and elixir state
 
@@ -92,18 +92,11 @@ from mohanetlight.bots.strategies import (
 DEBUG_PANEL_W = 310
 EXTENDED_WIN_W = WIN_W + DEBUG_PANEL_W
 
-# Strategy display names
-_STRAT_NAMES = {0: "AGGRESSIVE", 1: "DEFENSIVE", 2: "FARMING"}
-
-# Card display names
-_CARD_NAMES = ["Slot 0", "Slot 1", "Slot 2", "Slot 3", "NOOP"]
-
 # Reward component colours (match bar fills)
 _COMP_COLOURS: Dict[str, Tuple[int, int, int]] = {
     "DamageComponent": (255, 120, 40),      # orange
     "ElixirComponent": (180, 80, 220),       # purple
     "TerminalComponent": (60, 200, 60),      # green
-    "StrategyComponent": (80, 160, 255),     # blue
 }
 
 
@@ -250,16 +243,12 @@ class DebugRenderer(Renderer):
 
         # ── Section: ACTION ───────────────────────────────────────────
         py = self._section_header(px, py, "AGENT ACTION")
-        strat = d.get("strategy", -1)
         card_idx = d.get("card_idx", 4)
         tile_x = d.get("tile_x", 0)
         tile_y = d.get("tile_y", 0)
         valid = d.get("action_valid", True)
         card_name = d.get("card_name", "—")
 
-        strat_name = _STRAT_NAMES.get(strat, "?")
-        py = self._kv(px, py, "Strategy", strat_name,
-                      col=(255, 180, 50) if strat == 0 else (80, 200, 80) if strat == 1 else (80, 160, 255))
         if card_idx < 4:
             py = self._kv(px, py, "Card", f"[{card_idx}] {card_name}")
             py = self._kv(px, py, "Tile", f"({tile_x}, {tile_y})")
@@ -615,7 +604,6 @@ def main() -> None:
 
             renderer.set_debug(
                 step=step,
-                strategy=action_dict["strategy"],
                 card_idx=card_idx,
                 card_name=card_name,
                 tile_x=action_dict["tile_x"],

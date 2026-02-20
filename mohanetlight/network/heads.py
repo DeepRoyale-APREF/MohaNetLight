@@ -1,15 +1,14 @@
 """Hierarchical action heads and value head.
 
-AlphaStar-style autoregressive heads: each head's *sampled* output is
-embedded and fed as additional context to the next head.
+Autoregressive heads: each head's *sampled* output is embedded and fed
+as additional context to the next head.
 
 Connections per head
 --------------------
-- **Strategy** ← core LSTM output
-- **Card**     ← core + strategy_embed + entity_context
-- **Tile X**   ← core + card_embed     + entity_context
-- **Tile Y**   ← core + tile_x_embed   + entity_context
-- **Value**    ← core  (critic, no action conditioning)
+- **Card**   ← core + entity_context
+- **Tile X** ← core + card_embed   + entity_context
+- **Tile Y** ← core + tile_x_embed + entity_context
+- **Value**  ← core  (critic, no action conditioning)
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from typing import Dict, NamedTuple, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from torch.distributions import Categorical
 
@@ -114,97 +112,49 @@ class ActionEmbedding(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ① Strategy Head
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class StrategyHead(nn.Module):
-    """Residual MLP head for strategy selection.
-
-    Input : core LSTM output ``(B, 256)``
-    Output: logits ``(B, 3)`` → AGGRESSIVE / DEFENSIVE / FARMING
-
-    Architecture::
-
-        Linear(256 → 128) → ReLU → Linear(128 → 3)
-        + skip: Linear(256 → 128)  (residual)
-    """
-
-    def __init__(self, cfg: ModelConfig) -> None:
-        super().__init__()
-        h = cfg.lstm_hidden_dim
-        mid = cfg.head_hidden_dim
-
-        self.main = nn.Sequential(
-            nn.Linear(h, mid),
-            nn.ReLU(inplace=True),
-        )
-        self.skip = nn.Linear(h, mid)
-        self.logits = nn.Linear(mid, cfg.n_strategies)
-
-    def forward(self, core: Tensor) -> Tensor:
-        """Compute strategy logits.
-
-        Parameters
-        ----------
-        core : Tensor
-            Shape ``(B, lstm_hidden_dim)`` — LSTM output.
-
-        Returns
-        -------
-        Tensor
-            Shape ``(B, 3)`` — raw logits.
-        """
-        x = self.main(core) + self.skip(core)
-        return self.logits(F.relu(x))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ② Card Head
+# ① Card Head
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class CardHead(nn.Module):
     """MLP head for card selection.
 
-    Input: concat(core, strategy_embed, entity_context)
-    dim  = 256 + 64 + 128 = 448
+    Input: concat(core, entity_context)
+    dim  = 256 + 128 = 384
 
-    Output: logits ``(B, 5)`` → card slot 0-3 or NOOP (4).
+    Output: logits ``(B, 9)`` → deck slot 0-7 or NOOP (8).
     """
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
-        in_dim = cfg.head_input_dim  # 256 + 64 + 128
+        in_dim = cfg.card_head_input_dim  # 256 + 128
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, cfg.head_hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(cfg.head_hidden_dim, cfg.n_card_options),
         )
 
-    def forward(self, core: Tensor, prev_embed: Tensor, entity_ctx: Tensor) -> Tensor:
+    def forward(self, core: Tensor, entity_ctx: Tensor) -> Tensor:
         """Compute card logits.
 
         Parameters
         ----------
         core : Tensor
             ``(B, 256)`` LSTM output.
-        prev_embed : Tensor
-            ``(B, 64)`` strategy embedding.
         entity_ctx : Tensor
             ``(B, 128)`` entity encoder output.
 
         Returns
         -------
         Tensor
-            ``(B, 5)`` raw logits.
+            ``(B, 9)`` raw logits.
         """
-        x = torch.cat([core, prev_embed, entity_ctx], dim=-1)
+        x = torch.cat([core, entity_ctx], dim=-1)
         return self.mlp(x)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ③ Tile X Head
+# ② Tile X Head
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -231,7 +181,7 @@ class TileXHead(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ④ Tile Y Head
+# ③ Tile Y Head
 # ═══════════════════════════════════════════════════════════════════════════════
 
 

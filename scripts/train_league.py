@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--total-steps", type=int, default=1_000_000,
                     help="Total environment steps (default: 1M)")
     p.add_argument("--n-steps", type=int, default=512,
-                    help="Steps per rollout (default: 512)")
+                    help="Steps per rollout (default: 512, ~2-3 matches at frame_skip=30)")
     p.add_argument("--n-epochs", type=int, default=4,
                     help="PPO epochs per update (default: 4)")
     p.add_argument("--chunk-len", type=int, default=32,
@@ -55,6 +55,8 @@ def parse_args() -> argparse.Namespace:
                     help="Save model every N updates (default: 50)")
 
     # System
+    p.add_argument("--frame-skip", type=int, default=10,
+                    help="Physics frames per RL step (default: 10, ~3 decisions/s)")
     p.add_argument("--device", type=str, default=None,
                     choices=["cpu", "cuda", "mps"],
                     help="Torch device (default: auto-detect)")
@@ -85,6 +87,7 @@ def main() -> None:
         eval_matches_per_pair=args.eval_matches,
         checkpoint_interval=args.checkpoint_interval,
         log_dir=args.log_dir,
+        frame_skip=args.frame_skip,
     )
     if args.device is not None:
         train_kwargs["device"] = args.device

@@ -117,8 +117,8 @@ class LeagueTrainer:
         print(
             f"Training: {cfg.total_timesteps:,} steps, "
             f"{total_updates} updates × {cfg.n_steps} steps each\n"
-            f"  frame_skip={cfg.frame_skip} → ~{30 // cfg.frame_skip} decisions/s, "
-            f"~{int(240 * 30 / cfg.frame_skip)} steps/match (240s max)"
+            f"  frame_skip={cfg.frame_skip} → ~{30 / cfg.frame_skip:.1f} decisions/s, "
+            f"~{int(180 * 30 / cfg.frame_skip)} RL steps/match (180s match)"
         )
 
         for update_idx in range(1, total_updates + 1):

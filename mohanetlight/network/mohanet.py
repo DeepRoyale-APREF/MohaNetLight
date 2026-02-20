@@ -1,11 +1,11 @@
-"""MohaNetLight — assembled AlphaStar-inspired actor-critic network.
+"""MohaNetLight — assembled actor-critic network.
 
 Dataflow
 --------
 1. Encode inputs in parallel:  ScalarEncoder, EntityEncoder, CardEncoder
 2. Concatenate → 384-dim  →  LSTMCore  →  256-dim core output
 3. Hierarchical action heads (autoregressive):
-   strategy  →  card  →  tile_x  →  tile_y
+   card  →  tile_x  →  tile_y
 4. Value head (critic) reads core output only.
 
 The network exposes two main entry points:
@@ -29,7 +29,6 @@ from mohanetlight.network.heads import (
     ActionEmbedding,
     CardHead,
     HeadOutput,
-    StrategyHead,
     TileXHead,
     TileYHead,
     ValueHead,
@@ -40,7 +39,7 @@ from mohanetlight.network.heads import (
 class ModelOutput(NamedTuple):
     """Bundled model outputs for training / inference."""
 
-    actions: Dict[str, Tensor]      # {strategy, card, tile_x, tile_y} each (B,)
+    actions: Dict[str, Tensor]      # {card, tile_x, tile_y} each (B,)
     log_prob: Tensor                # (B,) sum of per-head log-probs
     value: Tensor                   # (B,) state-value estimate
     entropy: Tensor                 # (B,) sum of per-head entropies
@@ -73,15 +72,11 @@ class MohaNetLight(nn.Module):
         self.core = LSTMCore(cfg)
 
         # ── Hierarchical Action Heads ────────────────────────────────────
-        self.strategy_head = StrategyHead(cfg)
         self.card_head = CardHead(cfg)
         self.tile_x_head = TileXHead(cfg)
         self.tile_y_head = TileYHead(cfg)
 
-        # ── Action Embeddings (autoregressive links) ─────────────────────
-        self.strategy_embed = ActionEmbedding(
-            cfg.n_strategies, cfg.embedding_dim, cfg.embedding_proj_dim,
-        )
+        # ── Action Embeddings (autoregressive links) ─────────────────────────────
         self.card_embed = ActionEmbedding(
             cfg.n_card_options, cfg.embedding_dim, cfg.embedding_proj_dim,
         )
@@ -158,9 +153,9 @@ class MohaNetLight(nn.Module):
         troop_mask : Tensor ``(B, 100)``
         cards : Tensor     ``(B, 8, 5)``
         action_masks : Dict[str, Tensor]
-            ``strategy (B,3)  card (B,9)  tile_x_per_card (B,9,18)  tile_y_per_card (B,9,32)``
+            ``card (B,9)  tile_x_per_card (B,9,18)  tile_y_per_card (B,9,32)``
         actions : Dict[str, Tensor]
-            ``strategy (B,)  card (B,)  tile_x (B,)  tile_y (B,)``
+            ``card (B,)  tile_x (B,)  tile_y (B,)``
         hidden : LSTMState
             LSTM hidden state at the start of this step.
 
@@ -177,15 +172,8 @@ class MohaNetLight(nn.Module):
         core_out, new_hidden = self.core(concat.unsqueeze(1), hidden)
         core_out = core_out.squeeze(1)  # (B, 256)
 
-        # ── Strategy ─────────────────────────────────────────────────────
-        strat_logits = self.strategy_head(core_out)
-        strat_out = masked_categorical(
-            strat_logits, action_masks["strategy"], action=actions["strategy"],
-        )
-        strat_emb = self.strategy_embed(actions["strategy"])
-
         # ── Card ─────────────────────────────────────────────────────────
-        card_logits = self.card_head(core_out, strat_emb, entity_ctx)
+        card_logits = self.card_head(core_out, entity_ctx)
         card_out = masked_categorical(
             card_logits, action_masks["card"], action=actions["card"],
         )
@@ -210,10 +198,10 @@ class MohaNetLight(nn.Module):
 
         # ── Aggregated log-prob & entropy ────────────────────────────────
         log_prob = (
-            strat_out.log_prob + card_out.log_prob + tx_out.log_prob + ty_out.log_prob
+            card_out.log_prob + tx_out.log_prob + ty_out.log_prob
         )
         entropy = (
-            strat_out.entropy + card_out.entropy + tx_out.entropy + ty_out.entropy
+            card_out.entropy + tx_out.entropy + ty_out.entropy
         )
 
         value = self.value_head(core_out)
@@ -258,11 +246,7 @@ class MohaNetLight(nn.Module):
         B = core_out.size(0)
 
         # Autoregressive sampling
-        strat_logits = self.strategy_head(core_out)
-        strat_out = masked_categorical(strat_logits, action_masks["strategy"])
-        strat_emb = self.strategy_embed(strat_out.action)
-
-        card_logits = self.card_head(core_out, strat_emb, entity_ctx)
+        card_logits = self.card_head(core_out, entity_ctx)
         card_out = masked_categorical(card_logits, action_masks["card"])
         card_emb = self.card_embed(card_out.action)
 
@@ -278,16 +262,15 @@ class MohaNetLight(nn.Module):
         ty_out = masked_categorical(ty_logits, ty_mask)
 
         actions = {
-            "strategy": strat_out.action,
             "card": card_out.action,
             "tile_x": tx_out.action,
             "tile_y": ty_out.action,
         }
         log_prob = (
-            strat_out.log_prob + card_out.log_prob + tx_out.log_prob + ty_out.log_prob
+            card_out.log_prob + tx_out.log_prob + ty_out.log_prob
         )
         entropy = (
-            strat_out.entropy + card_out.entropy + tx_out.entropy + ty_out.entropy
+            card_out.entropy + tx_out.entropy + ty_out.entropy
         )
         value = self.value_head(core_out)
 

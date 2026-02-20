@@ -77,7 +77,7 @@ class RolloutBuffer:
         obs : dict
             Gymnasium observation dict (numpy arrays).
         action : dict
-            Sampled actions ``{strategy, card, tile_x, tile_y}`` as ints.
+            Sampled actions ``{card, tile_x, tile_y}`` as ints.
         log_prob : float
             Sum of per-head log-probabilities.
         value : float

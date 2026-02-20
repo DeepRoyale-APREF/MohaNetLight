@@ -13,7 +13,6 @@ from mohanetlight.network.heads import (
     ActionEmbedding,
     CardHead,
     HeadOutput,
-    StrategyHead,
     TileXHead,
     TileYHead,
     ValueHead,
@@ -42,7 +41,6 @@ def batch_tensors(cfg: ModelConfig):
     troop_mask[:, :10] = True  # 10 active troops
     cards = torch.randn(B, cfg.deck_size, cfg.card_feature_dim).abs()
     action_masks = {
-        "strategy": torch.ones(B, cfg.n_strategies, dtype=torch.bool),
         "card": torch.ones(B, cfg.n_card_options, dtype=torch.bool),
         "tile_x_per_card": torch.ones(B, cfg.n_card_options, cfg.n_tile_x, dtype=torch.bool),
         "tile_y_per_card": torch.ones(B, cfg.n_card_options, cfg.n_tile_y, dtype=torch.bool),
@@ -65,8 +63,12 @@ class TestConfig:
         assert cfg.concat_encoder_dim == 384
 
     def test_head_input_dim(self, cfg: ModelConfig):
-        # lstm_hidden(256) + embedding_proj(64) + encoder(128) = 448
+        # tile heads: lstm_hidden(256) + embedding_proj(64) + encoder(128) = 448
         assert cfg.head_input_dim == 448
+
+    def test_card_head_input_dim(self, cfg: ModelConfig):
+        # card head: lstm_hidden(256) + encoder(128) = 384 (no strategy embed)
+        assert cfg.card_head_input_dim == 384
 
     def test_training_config_mutable(self):
         tc = TrainingConfig()
@@ -180,19 +182,15 @@ class TestMaskedCategorical:
 
 class TestStrategyHead:
     def test_output_shape(self, cfg: ModelConfig):
-        head = StrategyHead(cfg)
-        core = torch.randn(2, cfg.lstm_hidden_dim)
-        logits = head(core)
-        assert logits.shape == (2, cfg.n_strategies)
+        pass  # StrategyHead removed
 
 
 class TestCardHead:
     def test_output_shape(self, cfg: ModelConfig):
         head = CardHead(cfg)
         core = torch.randn(2, cfg.lstm_hidden_dim)
-        emb = torch.randn(2, cfg.embedding_proj_dim)
         ent = torch.randn(2, cfg.encoder_dim)
-        logits = head(core, emb, ent)
+        logits = head(core, ent)
         assert logits.shape == (2, cfg.n_card_options)
 
 
@@ -222,7 +220,7 @@ class TestValueHead:
 
 class TestActionEmbedding:
     def test_output_shape(self, cfg: ModelConfig):
-        emb = ActionEmbedding(cfg.n_strategies, cfg.embedding_dim, cfg.embedding_proj_dim)
+        emb = ActionEmbedding(cfg.n_card_options, cfg.embedding_dim, cfg.embedding_proj_dim)
         action = torch.tensor([0, 1, 2])
         out = emb(action)
         assert out.shape == (3, cfg.embedding_proj_dim)
@@ -246,7 +244,6 @@ class TestMohaNetLight:
         output = model.act(scalars, troops, troop_mask, cards, action_masks, hidden)
 
         assert isinstance(output, ModelOutput)
-        assert output.actions["strategy"].shape == (B,)
         assert output.actions["card"].shape == (B,)
         assert output.actions["tile_x"].shape == (B,)
         assert output.actions["tile_y"].shape == (B,)
@@ -261,14 +258,13 @@ class TestMohaNetLight:
         troop_mask[0, :3] = True
         cards = torch.randn(1, cfg.deck_size, cfg.card_feature_dim).abs()
         action_masks = {
-            "strategy": torch.ones(1, cfg.n_strategies, dtype=torch.bool),
             "card": torch.ones(1, cfg.n_card_options, dtype=torch.bool),
             "tile_x_per_card": torch.ones(1, cfg.n_card_options, cfg.n_tile_x, dtype=torch.bool),
             "tile_y_per_card": torch.ones(1, cfg.n_card_options, cfg.n_tile_y, dtype=torch.bool),
         }
         hidden = model.init_hidden(1)
         output = model.act(scalars, troops, troop_mask, cards, action_masks, hidden)
-        assert output.actions["strategy"].shape == (1,)
+        assert output.actions["card"].shape == (1,)
 
     def test_evaluate_actions(self, model: MohaNetLight, batch_tensors, cfg: ModelConfig):
         scalars, troops, troop_mask, cards, action_masks = batch_tensors
@@ -295,7 +291,6 @@ class TestMohaNetLight:
         troop_mask[0, :2] = True
         cards = torch.randn(1, cfg.deck_size, cfg.card_feature_dim).abs()
         action_masks = {
-            "strategy": torch.ones(1, cfg.n_strategies, dtype=torch.bool),
             "card": torch.ones(1, cfg.n_card_options, dtype=torch.bool),
             "tile_x_per_card": torch.ones(1, cfg.n_card_options, cfg.n_tile_x, dtype=torch.bool),
             "tile_y_per_card": torch.ones(1, cfg.n_card_options, cfg.n_tile_y, dtype=torch.bool),
@@ -317,20 +312,17 @@ class TestMohaNetLight:
         troop_mask[:, :5] = True
         cards = torch.randn(B, cfg.deck_size, cfg.card_feature_dim).abs()
 
-        # Only strategy 0 and card 8 (noop) are valid
+        # Only card 8 (noop) is valid
         action_masks = {
-            "strategy": torch.zeros(B, cfg.n_strategies, dtype=torch.bool),
             "card": torch.zeros(B, cfg.n_card_options, dtype=torch.bool),
             "tile_x_per_card": torch.ones(B, cfg.n_card_options, cfg.n_tile_x, dtype=torch.bool),
             "tile_y_per_card": torch.ones(B, cfg.n_card_options, cfg.n_tile_y, dtype=torch.bool),
         }
-        action_masks["strategy"][:, 0] = True
         action_masks["card"][:, 8] = True  # noop only
 
         hidden = model.init_hidden(B)
         output = model.act(scalars, troops, troop_mask, cards, action_masks, hidden)
 
-        assert (output.actions["strategy"] == 0).all()
         assert (output.actions["card"] == 8).all()
 
 
@@ -353,13 +345,12 @@ class TestRolloutBuffer:
                 "troop_mask": np.zeros(100, dtype=bool),
                 "cards": np.zeros((8, 5), dtype=np.float32),
                 "action_mask": {
-                    "strategy": np.ones(3, dtype=bool),
                     "card": np.ones(9, dtype=bool),
                     "tile_x_per_card": np.ones((9, 18), dtype=bool),
                     "tile_y_per_card": np.ones((9, 32), dtype=bool),
                 },
             }
-            action = {"strategy": 0, "card": 8, "tile_x": 9, "tile_y": 15}
+            action = {"card": 8, "tile_x": 9, "tile_y": 15}
             buf.add(obs, action, log_prob=-1.0, value=0.5, reward=1.0,
                     done=False, hidden=hidden)
 
@@ -382,13 +373,12 @@ class TestRolloutBuffer:
                 "troop_mask": np.zeros(100, dtype=bool),
                 "cards": np.random.randn(4, 4).astype(np.float32),
                 "action_mask": {
-                    "strategy": np.ones(3, dtype=bool),
                     "card": np.ones(5, dtype=bool),
                     "tile_x": np.ones(18, dtype=bool),
                     "tile_y": np.ones(32, dtype=bool),
                 },
             }
-            action = {"strategy": 1, "card": 2, "tile_x": 5, "tile_y": 10}
+            action = {"card": 2, "tile_x": 5, "tile_y": 10}
             buf.add(obs, action, log_prob=-0.5, value=1.0, reward=0.5,
                     done=(i == 7), hidden=hidden)
 
@@ -397,7 +387,7 @@ class TestRolloutBuffer:
         chunks = list(buf.chunks(chunk_len=4))
         assert len(chunks) == 2
         assert chunks[0]["scalars"].shape == (4, 16)
-        assert chunks[0]["actions"]["strategy"].shape == (4,)
+        assert chunks[0]["actions"]["card"].shape == (4,)
 
     def test_reset(self):
         from mohanetlight.training.rollout import RolloutBuffer
@@ -412,13 +402,12 @@ class TestRolloutBuffer:
                 "troop_mask": np.zeros(100, dtype=bool),
                 "cards": np.zeros((8, 5), dtype=np.float32),
                 "action_mask": {
-                    "strategy": np.ones(3, dtype=bool),
                     "card": np.ones(9, dtype=bool),
                     "tile_x_per_card": np.ones((9, 18), dtype=bool),
                     "tile_y_per_card": np.ones((9, 32), dtype=bool),
                 },
             }
-            buf.add(obs, {"strategy": 0, "card": 8, "tile_x": 0, "tile_y": 0},
+            buf.add(obs, {"card": 8, "tile_x": 0, "tile_y": 0},
                     -1.0, 0.0, 0.0, False, hidden)
 
         buf.finish(0.0)
@@ -442,7 +431,6 @@ class TestTensorUtils:
             "troop_mask": np.zeros(100, dtype=bool),
             "cards": np.random.randn(8, 5).astype(np.float32),
             "action_mask": {
-                "strategy": np.ones(3, dtype=bool),
                 "card": np.ones(9, dtype=bool),
                 "tile_x_per_card": np.ones((9, 18), dtype=bool),
                 "tile_y_per_card": np.ones((9, 32), dtype=bool),
@@ -453,7 +441,7 @@ class TestTensorUtils:
         assert troops.shape == (1, 100, 14)
         assert troop_mask.shape == (1, 100)
         assert cards.shape == (1, 8, 5)
-        assert masks["strategy"].shape == (1, 3)
+        assert masks["card"].shape == (1, 9)
 
     def test_batch_obs(self):
         from mohanetlight.utils.tensor_utils import batch_obs
@@ -466,7 +454,6 @@ class TestTensorUtils:
                 "troop_mask": np.zeros(100, dtype=bool),
                 "cards": np.random.randn(8, 5).astype(np.float32),
                 "action_mask": {
-                    "strategy": np.ones(3, dtype=bool),
                     "card": np.ones(9, dtype=bool),
                     "tile_x_per_card": np.ones((9, 18), dtype=bool),
                     "tile_y_per_card": np.ones((9, 32), dtype=bool),

@@ -20,7 +20,7 @@ def obs_to_tensors(
     obs : dict
         Gymnasium Dict observation with keys:
         ``troops (100,14)``, ``troop_mask (100,)``, ``scalars (16,)``,
-        ``cards (8,5)``, ``action_mask {strategy, card, tile_x_per_card, tile_y_per_card}``.
+        ``cards (8,5)``, ``action_mask {card, tile_x_per_card, tile_y_per_card}``.
     device : str | torch.device
         Target device.
 
@@ -216,7 +216,6 @@ def state_to_obs_tensors(
         "troop_mask": mask_arr,
         "cards": cards_arr,
         "action_mask": {
-            "strategy": masks.strategy,
             "card": masks.card,
             "tile_x_per_card": masks.tile_x_per_card,
             "tile_y_per_card": masks.tile_y_per_card,
