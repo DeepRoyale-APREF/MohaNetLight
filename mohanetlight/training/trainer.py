@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 from clash_royale_gymnasium.env import ClashRoyaleGymEnv
+from clash_royale_gymnasium.league.match import run_match
 from clash_royale_gymnasium.league.player_slot import HeuristicSlot, PlayerSlot
 from clash_royale_gymnasium.league.tournament import LeagueTournament
 
@@ -82,11 +83,15 @@ class LeagueTrainer:
 
         # Opponents
         self.training_opponents = training_opponents or default_bot_roster()
+        # Eval: one bot per strategy (5 strategies) — avoids massive
+        # round-robin; _evaluate() plays agent-vs-each only.
         self.eval_opponents = eval_opponents or [
-            HeuristicSlot("Heuristic-0.3", aggression=0.3, seed=100),
-            HeuristicSlot("Heuristic-0.5", aggression=0.5, seed=101),
-            HeuristicSlot("Heuristic-0.8", aggression=0.8, seed=102),
-        ] + default_bot_roster()[:5]
+            default_bot_roster()[0],   # GiantPush
+            default_bot_roster()[2],   # BridgeSpam
+            default_bot_roster()[4],   # SpellCycle
+            default_bot_roster()[6],   # DefCounter
+            default_bot_roster()[8],   # Balanced
+        ]
 
         self.env_kwargs = env_kwargs or {}
         self.callback = callback
@@ -281,7 +286,11 @@ class LeagueTrainer:
     # ──────────────────────────────────────────────────────────────────────
 
     def _evaluate(self, update_idx: int) -> Dict[str, Any]:
-        """Run a mini league tournament and return summary stats."""
+        """Play the agent against each eval opponent (no round-robin).
+
+        Each opponent is faced ``eval_matches_per_pair`` times (alternating
+        sides).  Uses ``frame_skip`` to keep NN inference cost manageable.
+        """
         self.model.eval()
 
         agent = MohaNetAgent(
@@ -289,32 +298,59 @@ class LeagueTrainer:
             model=self.model,
             device=str(self.device),
         )
-        players: List[PlayerSlot] = [agent] + self.eval_opponents
 
-        league = LeagueTournament(
-            players=players,
-            matches_per_pair=self.train_cfg.eval_matches_per_pair,
-        )
-        results = league.run()
+        n_opps = len(self.eval_opponents)
+        mpp = self.train_cfg.eval_matches_per_pair
+        total_matches_planned = n_opps * mpp
 
-        # Find our agent's stats (stored in league.stats, keyed by name)
-        agent_stats = league.stats.get(agent.name)
-        if agent_stats is not None:
-            win_rate = agent_stats.wins / max(agent_stats.total_matches, 1)
-            avg_crowns = agent_stats.total_towers_destroyed / max(agent_stats.total_matches, 1)
-        else:
-            win_rate = 0.0
-            avg_crowns = 0.0
+        total_wins = 0
+        total_towers = 0
+        total_matches = 0
+
+        for opp_i, opp in enumerate(self.eval_opponents):
+            for m in range(mpp):
+                # Alternate sides
+                if m % 2 == 0:
+                    p0, p1 = agent, opp
+                    agent_pid = 0
+                else:
+                    p0, p1 = opp, agent
+                    agent_pid = 1
+
+                result = run_match(
+                    p0, p1,
+                    frame_skip=self.train_cfg.frame_skip,
+                    seed=update_idx * 1000 + total_matches,
+                )
+
+                if result.winner == agent_pid:
+                    total_wins += 1
+                if agent_pid == 0:
+                    total_towers += result.p0_towers_destroyed
+                else:
+                    total_towers += result.p1_towers_destroyed
+                total_matches += 1
+
+            # Brief progress per opponent
+            print(
+                f"    eval vs {opp.name}: "
+                f"{total_wins}/{total_matches} wins so far",
+                flush=True,
+            )
+
+        win_rate = total_wins / max(total_matches, 1)
+        avg_crowns = total_towers / max(total_matches, 1)
 
         print(
             f"  [Eval u{update_idx}] Win rate: {win_rate:.1%}, "
-            f"Avg crowns: {avg_crowns:.2f}"
+            f"Avg crowns: {avg_crowns:.2f}  ({total_matches} matches)",
+            flush=True,
         )
 
         return {
             "win_rate": win_rate,
             "avg_crowns": avg_crowns,
-            "matches": agent_stats.total_matches if agent_stats else 0,
+            "matches": total_matches,
         }
 
     # ──────────────────────────────────────────────────────────────────────
@@ -351,21 +387,22 @@ class LeagueTrainer:
         mr = metrics.get("mean_ep_reward", 0.0)
 
         print(
-            f"[u{u:4d}] sps={sps:.0f}  π={pl:.4f}  v={vl:.4f}  "
-            f"H={ent:.3f}  ΣR={r_sum:+.3f}  μR={r_mean:+.5f}  "
+            f"[u{u:4d}] sps={sps:.0f}  \u03c0={pl:.4f}  v={vl:.4f}  "
+            f"H={ent:.3f}  SR={r_sum:+.3f}  mR={r_mean:+.5f}  "
             f"|R|={r_abs:.5f}  nz={r_nz:.0%}  ep={n_eps}  "
-            f"epR={mr:+.3f}  vs={opp}"
+            f"epR={mr:+.3f}  vs={opp}",
+            flush=True,
         )
 
-        # Print per-component breakdown every 5 updates
+        # Print per-component breakdown every 25 updates
         components = metrics.get("reward_components", {})
-        if components and u % 5 == 0:
+        if components and u % 25 == 0:
             parts = "  ".join(f"{k}={v:+.4f}" for k, v in components.items())
-            print(f"        [components] {parts}")
+            print(f"        [components] {parts}", flush=True)
 
-        # Print full diagnosis periodically (every 10 updates or first 3)
-        if u <= 3 or u % 10 == 0:
-            print(self.reward_debugger.diagnose(u))
+        # Print full diagnosis every 50 updates (not early updates)
+        if u % 50 == 0:
+            print(self.reward_debugger.diagnose(u), flush=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -485,7 +485,7 @@ def main() -> None:
         help="Path to .pt model checkpoint.  If omitted, uses a random model.",
     )
     parser.add_argument(
-        "--opponent", type=str, default="Balanced",
+        "--opponent", type=str, default="GiantPush",
         help=f"Opponent bot.  Choices: {', '.join(_BOT_MAP)}",
     )
     parser.add_argument(
@@ -592,10 +592,11 @@ def main() -> None:
             card_idx = action_dict["card"]
             state = env.engine.get_state(0)
 
-            # Card name
+            # Card name — card_idx is a DECK index (0-7), not a hand slot
             card_name = "NOOP"
-            if card_idx < 4 and card_idx < len(state.cards):
-                card_name = state.cards[card_idx].name.replace("_", " ").title()
+            deck = state.deck if state.deck else [c.name for c in state.cards]
+            if card_idx < len(deck):
+                card_name = deck[card_idx].replace("_", " ").title()
 
             # Hand info
             hand = []

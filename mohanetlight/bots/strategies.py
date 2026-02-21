@@ -25,6 +25,7 @@ from clash_royale_engine.utils.constants import (
     LANE_DIVIDER_X,
     N_HEIGHT_TILES,
     N_WIDE_TILES,
+    RIVER_Y_MAX,
 )
 
 from clash_royale_gymnasium.league.player_slot import PlayerSlot
@@ -33,6 +34,34 @@ from clash_royale_gymnasium.league.player_slot import PlayerSlot
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _infer_player_id(state: State) -> int:
+    """Infer whether we are player 0 (bottom) or player 1 (top).
+
+    Uses the ally king-tower position.  P0's king is near y ≈ 0,
+    P1's near y ≈ 31.  Falls back to 0 if detection fails.
+    """
+    mid = N_HEIGHT_TILES // 2  # 16
+    for ally in state.allies:
+        if ally.unit.category == "building" and "king" in ally.unit.name:
+            return 0 if ally.position.tile_y < mid else 1
+    for ally in state.allies:
+        if ally.unit.category == "building":
+            return 0 if ally.position.tile_y < mid else 1
+    return 0
+
+
+def _abs_to_rel_y(tile_y: int, player_id: int) -> int:
+    """Convert absolute tile-y to player-relative coordinate.
+
+    Player 0: relative == absolute (own side at bottom).
+    Player 1: relative = 31 - absolute  (own side at top, flipped).
+    """
+    if player_id == 0:
+        return tile_y
+    return N_HEIGHT_TILES - 1 - tile_y
+
 
 def _card_name(state: State, idx: int) -> str:
     """Card name at hand index ``idx``."""
@@ -55,9 +84,15 @@ def _find_card_idx(state: State, names: List[str]) -> Optional[int]:
     return None
 
 
-def _enemies_on_our_side(state: State) -> List[UnitDetection]:
-    """Enemy units on our half (tile_y < BRIDGE_Y)."""
-    return [d for d in state.enemies if d.position.tile_y < BRIDGE_Y]
+def _enemies_on_our_side(state: State, player_id: int = 0) -> List[UnitDetection]:
+    """Enemy units that have crossed into our half of the arena.
+
+    Positions in State are *absolute*.  P0's side is y < BRIDGE_Y;
+    P1's side is y > RIVER_Y_MAX.
+    """
+    if player_id == 0:
+        return [d for d in state.enemies if d.position.tile_y < BRIDGE_Y]
+    return [d for d in state.enemies if d.position.tile_y > RIVER_Y_MAX]
 
 
 def _weakest_enemy_lane(state: State) -> str:
@@ -86,18 +121,23 @@ def _bridge_y(rng: random.Random) -> int:
     return rng.randint(BRIDGE_Y - 3, BRIDGE_Y - 1)
 
 
-def _spell_target(state: State, rng: random.Random) -> Tuple[int, int]:
-    """Target coordinates for a spell — clustered enemies or a tower."""
+def _spell_target(state: State, rng: random.Random, player_id: int = 0) -> Tuple[int, int]:
+    """Target coordinates for a spell — clustered enemies or a tower.
+
+    Returns *player-relative* coords (the engine flips y for P1).
+    """
     enemies = state.enemies
     if enemies:
-        # Target the cluster centroid
+        # Target the cluster centroid (absolute → player-relative)
         xs = [d.position.tile_x for d in enemies]
         ys = [d.position.tile_y for d in enemies]
-        return int(sum(xs) / len(xs)), int(sum(ys) / len(ys))
+        cx = int(sum(xs) / len(xs))
+        cy = int(sum(ys) / len(ys))
+        return cx, _abs_to_rel_y(cy, player_id)
     # Target weakest enemy tower
     lane = _weakest_enemy_lane(state)
     tx = 3 if lane == "left" else 14
-    ty = N_HEIGHT_TILES - 4  # near enemy tower
+    ty = N_HEIGHT_TILES - 4  # near enemy tower (player-relative)
     return tx, ty
 
 
@@ -137,8 +177,10 @@ class GiantPushBot(PlayerSlot):
         if not state.ready:
             return None
 
+        pid = _infer_player_id(state)
+
         # If enemies on our side, defend first
-        threats = _enemies_on_our_side(state)
+        threats = _enemies_on_our_side(state, pid)
         if threats and elixir >= 3:
             # Use cheapest troop to defend
             defend_idx = min(
@@ -148,7 +190,8 @@ class GiantPushBot(PlayerSlot):
             )
             if defend_idx is not None:
                 tx = int(threats[0].position.tile_x)
-                ty = max(1, int(threats[0].position.tile_y) - 2)
+                rel_y = _abs_to_rel_y(int(threats[0].position.tile_y), pid)
+                ty = max(1, rel_y - 2)
                 return (tx, ty, defend_idx)
 
         # Wait for elixir
@@ -177,7 +220,7 @@ class GiantPushBot(PlayerSlot):
         # Use spells on clustered enemies
         spell_idx = _find_card_idx(state, ["fireball", "arrows"])
         if spell_idx is not None and state.enemies:
-            sx, sy = _spell_target(state, self._rng)
+            sx, sy = _spell_target(state, self._rng, pid)
             return (sx, sy, spell_idx)
 
         # Play cheapest available
@@ -225,6 +268,8 @@ class BridgeSpamBot(PlayerSlot):
         if elixir < self.elixir_threshold or not state.ready:
             return None
 
+        pid = _infer_player_id(state)
+
         lane = self._rng.choice(["left", "right"])
         lx = _lane_x(lane, self._rng)
 
@@ -241,7 +286,7 @@ class BridgeSpamBot(PlayerSlot):
         # Spell on enemy tower
         spell_idx = _find_card_idx(state, ["fireball", "arrows"])
         if spell_idx is not None:
-            sx, sy = _spell_target(state, self._rng)
+            sx, sy = _spell_target(state, self._rng, pid)
             return (sx, sy, spell_idx)
 
         # Anything
@@ -289,13 +334,16 @@ class SpellCycleBot(PlayerSlot):
         if not state.ready:
             return None
 
+        pid = _infer_player_id(state)
+
         # Priority 1: defend against threats on our side
-        threats = _enemies_on_our_side(state)
+        threats = _enemies_on_our_side(state, pid)
         if threats and elixir >= 3:
             cheap = _find_card_idx(state, self.CHEAP_TROOPS)
             if cheap is not None:
                 tx = int(threats[0].position.tile_x)
-                ty = max(1, int(threats[0].position.tile_y) - 1)
+                rel_y = _abs_to_rel_y(int(threats[0].position.tile_y), pid)
+                ty = max(1, rel_y - 1)
                 return (tx, ty, cheap)
 
         # Priority 2: cast spell on enemy tower for chip damage
@@ -360,14 +408,16 @@ class DefensiveCounterBot(PlayerSlot):
         if not state.ready:
             return None
 
-        threats = _enemies_on_our_side(state)
+        pid = _infer_player_id(state)
+        threats = _enemies_on_our_side(state, pid)
 
         # Active defence: place counter troops on top of threats
         if threats:
             # Find strongest threat (highest HP)
             biggest = max(threats, key=lambda d: d.hp)
             bx = int(biggest.position.tile_x)
-            by = max(1, int(biggest.position.tile_y) - 2)
+            rel_y = _abs_to_rel_y(int(biggest.position.tile_y), pid)
+            by = max(1, rel_y - 2)
 
             # Use high-DPS cards against tanks
             stats = CARD_STATS.get(biggest.unit.name, {})
@@ -385,7 +435,7 @@ class DefensiveCounterBot(PlayerSlot):
             if len(threats) >= 2:
                 spell = _find_card_idx(state, ["fireball", "arrows"])
                 if spell is not None:
-                    sx, sy = _spell_target(state, self._rng)
+                    sx, sy = _spell_target(state, self._rng, pid)
                     return (int(sx), int(sy), spell)
 
         # No threats — counter-push if we have elixir advantage
@@ -450,7 +500,8 @@ class BalancedBot(PlayerSlot):
         if not state.ready:
             return None
 
-        threats = _enemies_on_our_side(state)
+        pid = _infer_player_id(state)
+        threats = _enemies_on_our_side(state, pid)
         n = state.numbers
 
         # Dynamic threshold: lower when we have HP advantage, higher when losing
@@ -474,14 +525,15 @@ class BalancedBot(PlayerSlot):
             if cheapest_troop is not None:
                 biggest = max(threats, key=lambda d: d.hp)
                 bx = int(biggest.position.tile_x)
-                by = max(1, int(biggest.position.tile_y) - 2)
+                rel_y = _abs_to_rel_y(int(biggest.position.tile_y), pid)
+                by = max(1, rel_y - 2)
                 return (bx, by, cheapest_troop)
 
             # Spell if multiple enemies
             if len(threats) >= 2:
                 spell = _find_card_idx(state, ["fireball", "arrows"])
                 if spell is not None:
-                    sx, sy = _spell_target(state, self._rng)
+                    sx, sy = _spell_target(state, self._rng, pid)
                     return (int(sx), int(sy), spell)
 
         if elixir < threshold:
