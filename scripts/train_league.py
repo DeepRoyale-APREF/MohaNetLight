@@ -47,10 +47,10 @@ def parse_args() -> argparse.Namespace:
                     help="Value function coefficient (default: 0.5)")
 
     # Eval
-    p.add_argument("--eval-interval", type=int, default=20,
-                    help="League eval every N updates (default: 20)")
-    p.add_argument("--eval-matches", type=int, default=6,
-                    help="Matches per pair in eval (default: 6)")
+    p.add_argument("--eval-interval", type=int, default=50,
+                    help="League eval every N updates (default: 50)")
+    p.add_argument("--eval-matches", type=int, default=2,
+                    help="Matches per opponent in eval (default: 2)")
     p.add_argument("--checkpoint-interval", type=int, default=50,
                     help="Save model every N updates (default: 50)")
 

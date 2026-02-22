@@ -69,6 +69,7 @@ from clash_royale_engine.visualization.renderer import (
     _ensure_pygame,
     _draw_text,
 )
+from clash_royale_engine.utils.constants import KING_TOWER_STATS, PRINCESS_TOWER_STATS
 
 # ── cr-gym ────────────────────────────────────────────────────────────────
 from clash_royale_gymnasium.env.clash_env import ClashRoyaleGymEnv
@@ -98,6 +99,9 @@ _COMP_COLOURS: Dict[str, Tuple[int, int, int]] = {
     "ElixirComponent": (180, 80, 220),       # purple
     "TerminalComponent": (60, 200, 60),      # green
 }
+
+_PRINCESS_TOWER_MAX_HP = float(PRINCESS_TOWER_STATS["hp"])
+_KING_TOWER_MAX_HP = float(KING_TOWER_STATS["hp"])
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -365,18 +369,48 @@ class DebugRenderer(Renderer):
         # ── Section: TOWER HP ─────────────────────────────────────────
         py = self._section_header(px, py, "TOWER HP")
         n = state.numbers
-        py = self._kv(px, py, "Own L", f"{n.left_princess_hp:.0f}/1400",
-                      col=self._hp_col(n.left_princess_hp, 1400))
-        py = self._kv(px, py, "Own R", f"{n.right_princess_hp:.0f}/1400",
-                      col=self._hp_col(n.right_princess_hp, 1400))
-        py = self._kv(px, py, "Own K", f"{n.king_hp:.0f}/2400",
-                      col=self._hp_col(n.king_hp, 2400))
-        py = self._kv(px, py, "Ene L", f"{n.left_enemy_princess_hp:.0f}/1400",
-                      col=self._hp_col(n.left_enemy_princess_hp, 1400))
-        py = self._kv(px, py, "Ene R", f"{n.right_enemy_princess_hp:.0f}/1400",
-                      col=self._hp_col(n.right_enemy_princess_hp, 1400))
-        py = self._kv(px, py, "Ene K", f"{n.enemy_king_hp:.0f}/2400",
-                      col=self._hp_col(n.enemy_king_hp, 2400))
+        py = self._kv(
+            px,
+            py,
+            "Own L",
+            f"{n.left_princess_hp:.0f}/{_PRINCESS_TOWER_MAX_HP:.0f}",
+            col=self._hp_col(n.left_princess_hp, _PRINCESS_TOWER_MAX_HP),
+        )
+        py = self._kv(
+            px,
+            py,
+            "Own R",
+            f"{n.right_princess_hp:.0f}/{_PRINCESS_TOWER_MAX_HP:.0f}",
+            col=self._hp_col(n.right_princess_hp, _PRINCESS_TOWER_MAX_HP),
+        )
+        py = self._kv(
+            px,
+            py,
+            "Own K",
+            f"{n.king_hp:.0f}/{_KING_TOWER_MAX_HP:.0f}",
+            col=self._hp_col(n.king_hp, _KING_TOWER_MAX_HP),
+        )
+        py = self._kv(
+            px,
+            py,
+            "Ene L",
+            f"{n.left_enemy_princess_hp:.0f}/{_PRINCESS_TOWER_MAX_HP:.0f}",
+            col=self._hp_col(n.left_enemy_princess_hp, _PRINCESS_TOWER_MAX_HP),
+        )
+        py = self._kv(
+            px,
+            py,
+            "Ene R",
+            f"{n.right_enemy_princess_hp:.0f}/{_PRINCESS_TOWER_MAX_HP:.0f}",
+            col=self._hp_col(n.right_enemy_princess_hp, _PRINCESS_TOWER_MAX_HP),
+        )
+        py = self._kv(
+            px,
+            py,
+            "Ene K",
+            f"{n.enemy_king_hp:.0f}/{_KING_TOWER_MAX_HP:.0f}",
+            col=self._hp_col(n.enemy_king_hp, _KING_TOWER_MAX_HP),
+        )
 
         py += 6
 
@@ -485,7 +519,7 @@ def main() -> None:
         help="Path to .pt model checkpoint.  If omitted, uses a random model.",
     )
     parser.add_argument(
-        "--opponent", type=str, default="Balanced",
+        "--opponent", type=str, default="GiantPush",
         help=f"Opponent bot.  Choices: {', '.join(_BOT_MAP)}",
     )
     parser.add_argument(
@@ -592,10 +626,11 @@ def main() -> None:
             card_idx = action_dict["card"]
             state = env.engine.get_state(0)
 
-            # Card name
+            # Card name — card_idx is a DECK index (0-7), not a hand slot
             card_name = "NOOP"
-            if card_idx < 4 and card_idx < len(state.cards):
-                card_name = state.cards[card_idx].name.replace("_", " ").title()
+            deck = state.deck if state.deck else [c.name for c in state.cards]
+            if card_idx < len(deck):
+                card_name = deck[card_idx].replace("_", " ").title()
 
             # Hand info
             hand = []
