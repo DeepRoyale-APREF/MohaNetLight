@@ -206,7 +206,7 @@ class TrainingConfig:
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
     vf_coef: float = 0.5
-    ent_coef: float = 0.01
+    ent_coef: float = 0.05
     max_grad_norm: float = 0.5
     lr: float = 3e-4
     frame_skip: int = 10

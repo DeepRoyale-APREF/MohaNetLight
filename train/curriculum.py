@@ -293,7 +293,7 @@ def default_curriculum(
             eval_opponents=balanced_bots,
             n_steps=n_steps,
             lr=lr,
-            ent_coef=0.02,  # Higher entropy early = more exploration
+            ent_coef=0.05,  # High entropy to survive early value-loss dominance
             eval_interval=25,
             checkpoint_interval=25,
         ),
@@ -304,7 +304,7 @@ def default_curriculum(
             eval_opponents=strong_bots,
             n_steps=n_steps,
             lr=lr,
-            ent_coef=0.015,
+            ent_coef=0.03,
             eval_interval=25,
             checkpoint_interval=25,
         ),

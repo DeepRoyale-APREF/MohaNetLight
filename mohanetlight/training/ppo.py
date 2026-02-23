@@ -160,7 +160,10 @@ class PPOTrainer:
         policy_loss = -torch.min(surr1, surr2).mean()
 
         # ── Value loss (clipped) ──────────────────────────────────────────
-        value_loss = nn.functional.mse_loss(new_values, returns)
+        # Clip per-sample value error to prevent enormous early gradients
+        # from the critic drowning the entropy bonus signal.
+        value_error = (new_values - returns).clamp(-10.0, 10.0)
+        value_loss = (value_error ** 2).mean()
 
         # ── Entropy bonus ─────────────────────────────────────────────────
         entropy_loss = -entropy.mean()

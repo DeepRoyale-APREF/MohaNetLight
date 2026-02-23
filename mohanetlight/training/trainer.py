@@ -123,7 +123,9 @@ class LeagueTrainer:
             f"Training: {cfg.total_timesteps:,} steps, "
             f"{total_updates} updates × {cfg.n_steps} steps each\n"
             f"  frame_skip={cfg.frame_skip} → ~{30 / cfg.frame_skip:.1f} decisions/s, "
-            f"~{int(180 * 30 / cfg.frame_skip)} RL steps/match (180s match)"
+            f"~{int(180 * 30 / cfg.frame_skip)} RL steps/match (180s match)\n"
+            f"  lr={cfg.lr}  ent_coef={cfg.ent_coef}  vf_coef={cfg.vf_coef}  "
+            f"clip_eps={cfg.clip_eps}  max_grad_norm={cfg.max_grad_norm}"
         )
 
         for update_idx in range(1, total_updates + 1):
