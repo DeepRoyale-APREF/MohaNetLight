@@ -74,7 +74,7 @@ class PhaseConfig:
     total_timesteps: int
     training_opponents: List[PlayerSlot] = field(default_factory=list)
     eval_opponents: Optional[List[PlayerSlot]] = None
-    n_steps: int = 512
+    n_steps: int = 2048
     lr: float = 3e-4
     ent_coef: float = 0.01
     eval_interval: int = 25

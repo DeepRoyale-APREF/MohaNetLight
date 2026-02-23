@@ -1,53 +1,89 @@
-"""League trainer — orchestrates PPO training with periodic league evaluation.
+"""Baseline trainer — reuses PPO infrastructure with baseline models.
 
-Dataflow per iteration:
-1. Collect ``n_steps`` environment transitions against a random training opponent.
-2. Compute GAE advantages.
-3. Run ``n_epochs`` of PPO clipped updates (truncated BPTT).
-4. Every ``eval_interval`` updates, run a league tournament against heuristic bots.
-5. Save checkpoints periodically.
+Drop-in replacement for :class:`LeagueTrainer` that accepts any model
+implementing the standard interface (``act``, ``evaluate_actions``,
+``init_hidden``, ``count_parameters``).
+
+This enables fair comparison: **identical PPO hyperparams, opponents,
+and evaluation protocol**, only the model architecture differs.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from clash_royale_gymnasium.env import ClashRoyaleGymEnv
 from clash_royale_gymnasium.league.match import run_match
-from clash_royale_gymnasium.league.player_slot import HeuristicSlot, PlayerSlot
-from clash_royale_gymnasium.league.tournament import LeagueTournament
+from clash_royale_gymnasium.league.player_slot import PlayerSlot
 
+from mohanetlight.baseline.config import BaselineConfig
+from mohanetlight.baseline.conv_lstm import ConvLSTMNet
+from mohanetlight.baseline.flat_mlp import FlatMLPNet
 from mohanetlight.bots.strategies import default_bot_roster
-from mohanetlight.config import ModelConfig, TrainingConfig
-from mohanetlight.inference.agent import MohaNetAgent
+from mohanetlight.config import TrainingConfig
+from mohanetlight.inference.baseline_agent import BaselineAgent
 from mohanetlight.network.core import LSTMState
-from mohanetlight.network.mohanet import MohaNetLight
 from mohanetlight.training.ppo import PPOTrainer
-from mohanetlight.training.reward_debugger import RewardDebugger, RewardSnapshot
+from mohanetlight.training.reward_debugger import RewardDebugger
 from mohanetlight.training.rollout import RolloutBuffer
 from mohanetlight.utils.tensor_utils import obs_to_tensors
 
+# Type alias for supported baseline models
+BaselineModel = Union[ConvLSTMNet, FlatMLPNet]
 
-class LeagueTrainer:
-    """End-to-end PPO + league evaluation training loop.
+
+def build_baseline_model(
+    model_type: str,
+    cfg: BaselineConfig | None = None,
+) -> BaselineModel:
+    """Factory for baseline models.
 
     Parameters
     ----------
-    model_cfg : ModelConfig
-        Network architecture config.
-    train_cfg : TrainingConfig
+    model_type : str
+        ``"conv_lstm"`` or ``"flat_mlp"``.
+    cfg : BaselineConfig | None
+        Architecture config.
+
+    Returns
+    -------
+    ConvLSTMNet | FlatMLPNet
+    """
+    cfg = cfg or BaselineConfig()
+    if model_type == "flat_mlp":
+        return FlatMLPNet(cfg)
+    elif model_type == "conv_lstm":
+        return ConvLSTMNet(cfg)
+    else:
+        raise ValueError(f"Unknown baseline model type: {model_type!r}")
+
+
+class BaselineTrainer:
+    """PPO trainer for baseline models — mirrors LeagueTrainer's interface.
+
+    Uses the **same PPO hyperparameters, rollout buffer, opponent pool,
+    and evaluation protocol** as the main MohaNet trainer, ensuring a
+    fair comparison.
+
+    Parameters
+    ----------
+    model_type : str
+        ``"conv_lstm"`` or ``"flat_mlp"``.
+    baseline_cfg : BaselineConfig | None
+        Baseline architecture config.
+    train_cfg : TrainingConfig | None
         PPO and training loop hyperparameters.
     training_opponents : list[PlayerSlot] | None
-        Bots to sample from during data collection (default: heuristic roster).
+        Bots to sample from during data collection.
     eval_opponents : list[PlayerSlot] | None
-        Bots for periodic league evaluation (default: heuristic roster).
+        Bots for periodic league evaluation.
     env_kwargs : dict | None
         Extra kwargs forwarded to ``ClashRoyaleGymEnv``.
     callback : Callable | None
@@ -56,25 +92,29 @@ class LeagueTrainer:
 
     def __init__(
         self,
-        model_cfg: ModelConfig | None = None,
+        model_type: str = "conv_lstm",
+        baseline_cfg: BaselineConfig | None = None,
         train_cfg: TrainingConfig | None = None,
         training_opponents: Optional[List[PlayerSlot]] = None,
         eval_opponents: Optional[List[PlayerSlot]] = None,
         env_kwargs: Optional[Dict[str, Any]] = None,
         callback: Optional[Callable[[int, Dict[str, Any]], None]] = None,
     ) -> None:
-        self.model_cfg = model_cfg or ModelConfig()
+        self.model_type = model_type
+        self.baseline_cfg = baseline_cfg or BaselineConfig()
         self.train_cfg = train_cfg or TrainingConfig()
         self.device = torch.device(self.train_cfg.device)
 
         # Model
-        self.model = MohaNetLight(self.model_cfg).to(self.device)
-        print(f"MohaNetLight — {self.model.count_parameters():,} parameters")
+        self.model = build_baseline_model(model_type, self.baseline_cfg)
+        self.model.to(self.device)
+        model_name = type(self.model).__name__
+        print(f"{model_name} — {self.model.count_parameters():,} parameters")
 
-        # PPO
+        # PPO (model-agnostic — uses evaluate_actions interface)
         self.ppo = PPOTrainer(self.model, self.train_cfg)
 
-        # Rollout buffer
+        # Rollout buffer (model-agnostic)
         self.buffer = RolloutBuffer(
             n_steps=self.train_cfg.n_steps,
             gamma=self.train_cfg.gamma,
@@ -83,8 +123,6 @@ class LeagueTrainer:
 
         # Opponents
         self.training_opponents = training_opponents or default_bot_roster()
-        # Eval: one bot per strategy (5 strategies) — avoids massive
-        # round-robin; _evaluate() plays agent-vs-each only.
         self.eval_opponents = eval_opponents or [
             default_bot_roster()[0],   # GiantPush
             default_bot_roster()[2],   # BridgeSpam
@@ -102,7 +140,7 @@ class LeagueTrainer:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._metrics_history: List[Dict[str, Any]] = []
 
-        # Reward debugger — tracks per-step and cross-rollout reward signals
+        # Reward debugger
         self.reward_debugger = RewardDebugger(
             log_dir=self.log_dir,
             verbose=True,
@@ -118,22 +156,22 @@ class LeagueTrainer:
         cfg = self.train_cfg
         total_updates = cfg.total_timesteps // cfg.n_steps
         global_step = 0
+        model_name = type(self.model).__name__
 
         print(
-            f"Training: {cfg.total_timesteps:,} steps, "
+            f"Training {model_name}: {cfg.total_timesteps:,} steps, "
             f"{total_updates} updates × {cfg.n_steps} steps each\n"
-            f"  frame_skip={cfg.frame_skip} → ~{30 / cfg.frame_skip:.1f} decisions/s, "
-            f"~{int(180 * 30 / cfg.frame_skip)} RL steps/match (180s match)"
+            f"  frame_skip={cfg.frame_skip} → ~{30 / cfg.frame_skip:.1f} decisions/s"
         )
 
         for update_idx in range(1, total_updates + 1):
             t0 = time.time()
 
-            # ── 1. Collect rollout ────────────────────────────────────────
+            # 1. Collect rollout
             rollout_info = self._collect_rollout()
             global_step += cfg.n_steps
 
-            # ── 2. PPO update (with LR annealing) ────────────────────────
+            # 2. PPO update (with LR annealing)
             progress = (update_idx - 1) / max(total_updates - 1, 1)
             ppo_metrics = self.ppo.update(self.buffer, progress=progress)
             self.buffer.reset()
@@ -149,17 +187,17 @@ class LeagueTrainer:
                 **rollout_info,
             }
 
-            # ── 3. Periodic evaluation ────────────────────────────────────
+            # 3. Periodic evaluation
             if update_idx % cfg.eval_interval == 0:
                 eval_metrics = self._evaluate(update_idx)
                 metrics["eval"] = eval_metrics
 
-            # ── 4. Checkpoint ─────────────────────────────────────────────
+            # 4. Checkpoint
             if update_idx % cfg.checkpoint_interval == 0:
                 self._save_checkpoint(update_idx)
                 self.reward_debugger.save()
 
-            # ── 5. Log ────────────────────────────────────────────────────
+            # 5. Log
             self._log(metrics)
             self._metrics_history.append(metrics)
 
@@ -170,21 +208,14 @@ class LeagueTrainer:
         self._save_checkpoint(total_updates)
         self._save_metrics()
         self.reward_debugger.save()
-        print("Training complete.")
+        print(f"Training {model_name} complete.")
 
     # ──────────────────────────────────────────────────────────────────────
     # Rollout collection
     # ──────────────────────────────────────────────────────────────────────
 
     def _collect_rollout(self) -> Dict[str, float]:
-        """Collect exactly ``n_steps`` transitions (fixed-length rollout).
-
-        Episodes that end mid-rollout are reset and collection continues.
-        Incomplete episodes at the end are bootstrapped via the critic
-        value in :meth:`finish`.  This standard approach guarantees
-        consistent batch sizes across PPO updates.
-        """
-        # Pick a random training opponent for this rollout
+        """Collect exactly ``n_steps`` transitions (fixed-length rollout)."""
         opp_idx = int(self._rng.integers(len(self.training_opponents)))
         opp = self.training_opponents[opp_idx]
         opp.reset()
@@ -206,9 +237,6 @@ class LeagueTrainer:
         n_episodes = 0
         step = 0
 
-        # Fixed-length rollout: collect exactly n_steps transitions.
-        # Mid-rollout episode boundaries are handled by resetting the env
-        # and LSTM hidden state.  Incomplete final episodes are bootstrapped.
         while step < self.train_cfg.n_steps:
             scalars, troops, troop_mask, cards, arena_map, action_masks = obs_to_tensors(
                 obs, device=self.device,
@@ -218,21 +246,19 @@ class LeagueTrainer:
                 scalars, troops, troop_mask, cards, arena_map, action_masks, hidden,
             )
 
-            # Store transition
             action_dict = {k: int(v.item()) for k, v in output.actions.items()}
             self.buffer.add(
                 obs=obs,
                 action=action_dict,
                 log_prob=output.log_prob.item(),
                 value=output.value.item(),
-                reward=0.0,  # filled below
-                done=False,  # filled below
+                reward=0.0,
+                done=False,
                 hidden=_detach(hidden),
             )
 
             hidden = output.hidden
 
-            # Step environment
             gym_action = {k: int(v.item()) for k, v in output.actions.items()}
             next_obs, reward, terminated, truncated, info = env.step(gym_action)
 
@@ -241,7 +267,6 @@ class LeagueTrainer:
             self.buffer.dones[-1] = done
             ep_reward += float(reward)
 
-            # Feed reward debugger with per-step data
             self.reward_debugger.on_step(
                 reward=float(reward),
                 done=done,
@@ -259,28 +284,25 @@ class LeagueTrainer:
                 hidden = self.model.init_hidden(batch_size=1)
                 hidden = _to_device(hidden, self.device)
 
-        # Bootstrap value for last state
+        # Bootstrap value
         with torch.no_grad():
             s, tr, m, c, am_map, am = obs_to_tensors(obs, device=self.device)
             last_output = self.model.act(s, tr, m, c, am_map, am, hidden)
             last_value = last_output.value.item()
 
         self.buffer.finish(last_value)
-
-        # Finalise reward debug snapshot for this rollout
         reward_snapshot = self.reward_debugger.finish_rollout()
-
         env.close()
 
-        # Use cross-rollout episode reward if available, else report rollout sum
         cross_ep_reward = self.reward_debugger.get_mean_episode_reward()
-        mean_ep_reward = float(np.mean(episode_rewards)) if episode_rewards else cross_ep_reward
+        mean_ep_reward = (
+            float(np.mean(episode_rewards)) if episode_rewards else cross_ep_reward
+        )
 
         return {
             "mean_ep_reward": mean_ep_reward,
             "n_episodes": n_episodes,
             "opponent": opp.name,
-            # New: actual per-step reward stats
             "rollout_reward_sum": reward_snapshot.total,
             "rollout_reward_mean": reward_snapshot.mean,
             "rollout_reward_abs_mean": reward_snapshot.abs_mean,
@@ -291,34 +313,27 @@ class LeagueTrainer:
         }
 
     # ──────────────────────────────────────────────────────────────────────
-    # Evaluation via league tournament
+    # Evaluation
     # ──────────────────────────────────────────────────────────────────────
 
     def _evaluate(self, update_idx: int) -> Dict[str, Any]:
-        """Play the agent against each eval opponent (no round-robin).
-
-        Each opponent is faced ``eval_matches_per_pair`` times (alternating
-        sides).  Uses ``frame_skip`` to keep NN inference cost manageable.
-        """
+        """Play agent against each eval opponent — identical protocol."""
         self.model.eval()
+        model_name = type(self.model).__name__
 
-        agent = MohaNetAgent(
-            name=f"MohaNet-u{update_idx}",
+        agent = BaselineAgent(
+            name=f"{model_name}-u{update_idx}",
             model=self.model,
             device=str(self.device),
         )
 
-        n_opps = len(self.eval_opponents)
         mpp = self.train_cfg.eval_matches_per_pair
-        total_matches_planned = n_opps * mpp
-
         total_wins = 0
         total_towers = 0
         total_matches = 0
 
-        for opp_i, opp in enumerate(self.eval_opponents):
+        for opp in self.eval_opponents:
             for m in range(mpp):
-                # Alternate sides
                 if m % 2 == 0:
                     p0, p1 = agent, opp
                     agent_pid = 0
@@ -340,7 +355,6 @@ class LeagueTrainer:
                     total_towers += result.p1_towers_destroyed
                 total_matches += 1
 
-            # Brief progress per opponent
             print(
                 f"    eval vs {opp.name}: "
                 f"{total_wins}/{total_matches} wins so far",
@@ -351,7 +365,7 @@ class LeagueTrainer:
         avg_crowns = total_towers / max(total_matches, 1)
 
         print(
-            f"  [Eval u{update_idx}] Win rate: {win_rate:.1%}, "
+            f"  [Eval u{update_idx}] {model_name} — Win rate: {win_rate:.1%}, "
             f"Avg crowns: {avg_crowns:.2f}  ({total_matches} matches)",
             flush=True,
         )
@@ -368,7 +382,8 @@ class LeagueTrainer:
 
     def _save_checkpoint(self, update_idx: int) -> None:
         """Save model state dict."""
-        path = self.log_dir / f"mohanet_u{update_idx}.pt"
+        prefix = self.model_type
+        path = self.log_dir / f"{prefix}_u{update_idx}.pt"
         torch.save(self.model.state_dict(), path)
         print(f"  Checkpoint saved: {path}")
 
@@ -379,15 +394,13 @@ class LeagueTrainer:
             json.dump(self._metrics_history, f, indent=2, default=str)
 
     def _log(self, metrics: Dict[str, Any]) -> None:
-        """Print a compact summary line with actual reward statistics."""
+        """Print a compact summary line."""
         u = metrics["update"]
         sps = metrics.get("sps", 0)
         pl = metrics.get("policy_loss", 0)
         vl = metrics.get("value_loss", 0)
         ent = metrics.get("entropy", 0)
         opp = metrics.get("opponent", "?")
-
-        # Actual per-step reward stats (not episode-gated)
         r_sum = metrics.get("rollout_reward_sum", 0.0)
         r_mean = metrics.get("rollout_reward_mean", 0.0)
         r_abs = metrics.get("rollout_reward_abs_mean", 0.0)
@@ -396,20 +409,18 @@ class LeagueTrainer:
         mr = metrics.get("mean_ep_reward", 0.0)
 
         print(
-            f"[u{u:4d}] sps={sps:.0f}  \u03c0={pl:.4f}  v={vl:.4f}  "
+            f"[u{u:4d}] sps={sps:.0f}  π={pl:.4f}  v={vl:.4f}  "
             f"H={ent:.3f}  SR={r_sum:+.3f}  mR={r_mean:+.5f}  "
             f"|R|={r_abs:.5f}  nz={r_nz:.0%}  ep={n_eps}  "
             f"epR={mr:+.3f}  vs={opp}",
             flush=True,
         )
 
-        # Print per-component breakdown every 25 updates
         components = metrics.get("reward_components", {})
         if components and u % 25 == 0:
             parts = "  ".join(f"{k}={v:+.4f}" for k, v in components.items())
             print(f"        [components] {parts}", flush=True)
 
-        # Print full diagnosis every 50 updates (not early updates)
         if u % 50 == 0:
             print(self.reward_debugger.diagnose(u), flush=True)
 

@@ -1,5 +1,6 @@
-"""Inference module — MohaNetAgent for league play."""
+"""Inference module — MohaNetAgent and BaselineAgent for league play."""
 
 from mohanetlight.inference.agent import MohaNetAgent
+from mohanetlight.inference.baseline_agent import BaselineAgent
 
-__all__ = ["MohaNetAgent"]
+__all__ = ["BaselineAgent", "MohaNetAgent"]

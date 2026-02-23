@@ -43,16 +43,16 @@ def parse_args() -> argparse.Namespace:
         description="Run multi-phase curriculum training for MohaNetLight",
     )
     p.add_argument(
-        "--steps-per-phase", type=int, default=5,
+        "--steps-per-phase", type=int, default=200_000,
         help="Env steps for phases 1-3 (default: 200K)",
     )
     p.add_argument(
-        "--self-play-steps", type=int, default=1,
-        help="Env steps for self-play phase (default: 200K)",
+        "--self-play-steps", type=int, default=200_000,
+        help="Env steps for self-play phase (de_fault: 200K)",
     )
     p.add_argument(
-        "--n-steps", type=int, default=512,
-        help="Rollout length — steps per PPO update (default: 512)",
+        "--n-steps", type=int, default=2048,
+        help="Rollout length — steps per PPO update (default: 2048)",
     )
     p.add_argument(
         "--lr", type=float, default=3e-4,

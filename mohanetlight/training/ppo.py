@@ -37,21 +37,37 @@ class PPOTrainer:
         self.device = torch.device(cfg.device)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, eps=1e-5)
 
-    def update(self, buffer: RolloutBuffer) -> Dict[str, float]:
+    def update(self, buffer: RolloutBuffer, progress: float = 0.0) -> Dict[str, float]:
         """Run PPO update epochs on the collected rollout.
 
         Parameters
         ----------
         buffer : RolloutBuffer
             Filled buffer with computed advantages (call ``finish()`` first).
+        progress : float
+            Training progress in [0, 1] for LR annealing.  0 = start, 1 = end.
 
         Returns
         -------
         dict[str, float]
             Training metrics: ``policy_loss``, ``value_loss``,
-            ``entropy``, ``approx_kl``, ``clip_fraction``.
+            ``entropy``, ``approx_kl``, ``clip_fraction``, ``lr``.
         """
         self.model.train()
+
+        # ── Linear LR annealing ───────────────────────────────────────────
+        lr_now = self.cfg.lr * (1.0 - progress)
+        lr_now = max(lr_now, 1e-7)  # floor to avoid zero LR
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = lr_now
+
+        # ── Normalise advantages across entire rollout (once) ─────────────
+        assert buffer.advantages is not None, "Call buffer.finish() before update()"
+        adv_std = buffer.advantages.std()
+        if adv_std > 1e-8:
+            buffer.advantages = (
+                (buffer.advantages - buffer.advantages.mean()) / (adv_std + 1e-8)
+            )
 
         total_policy_loss = 0.0
         total_value_loss = 0.0
@@ -77,6 +93,7 @@ class PPOTrainer:
             "entropy": total_entropy / n_chunks,
             "approx_kl": total_kl / n_chunks,
             "clip_fraction": total_clip_frac / n_chunks,
+            "lr": lr_now,
         }
 
     def _update_chunk(self, chunk: Dict[str, Tensor | Dict[str, Tensor] | LSTMState]) -> Dict[str, float]:
@@ -96,11 +113,8 @@ class PPOTrainer:
 
         T = scalars.shape[0]
 
-        # Normalise advantages (per chunk)
-        if T > 1:
-            adv_std = advantages.std()
-            if adv_std > 1e-8:
-                advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+        # Normalise advantages (per chunk) — REMOVED: now done at rollout
+        # level in update() for more stable statistics.
 
         # Forward through each timestep sequentially (truncated BPTT)
         log_probs_list = []
