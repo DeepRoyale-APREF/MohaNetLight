@@ -242,7 +242,8 @@ class TestValueHead:
     def test_output_shape(self, cfg: ModelConfig):
         head = ValueHead(cfg)
         core = torch.randn(2, cfg.lstm_hidden_dim)
-        val = head(core)
+        scalars = torch.randn(2, cfg.scalar_dim)
+        val = head(core, scalars)
         assert val.shape == (2,)
 
 

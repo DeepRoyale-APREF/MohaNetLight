@@ -7,7 +7,7 @@ Dataflow
 2. Concatenate → 512-dim  →  LSTMCore  →  256-dim core output
 3. Hierarchical action heads (autoregressive):
    card  →  **SpatialDecoder** (ResNet) → position (tile_x, tile_y)
-4. Value head (critic) reads core output only.
+4. Value head (critic) reads core output + raw scalar baseline features.
 
 The ArenaEncoder additionally produces full-resolution feature maps
 that are passed to the SpatialDecoder for position selection.
@@ -217,7 +217,7 @@ class MohaNetLight(nn.Module):
         log_prob = card_out.log_prob + pos_out.log_prob
         entropy = card_out.entropy + pos_out.entropy
 
-        value = self.value_head(core_out)
+        value = self.value_head(core_out, scalars)
 
         return log_prob, value, entropy, new_hidden
 
@@ -287,7 +287,7 @@ class MohaNetLight(nn.Module):
         }
         log_prob = card_out.log_prob + pos_out.log_prob
         entropy = card_out.entropy + pos_out.entropy
-        value = self.value_head(core_out)
+        value = self.value_head(core_out, scalars)
 
         return ModelOutput(
             actions=actions,

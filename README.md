@@ -219,7 +219,7 @@ MohaNetlight/
     │            │                                 │
     │   ┌────────▼──────────┐    ┌─────────────────▼──┐
     │   │  Acciones (π)     │    │    Value Head      │
-    │   │  {card, position} │    │    256→128→1       │
+    │   │  {card, position} │    │  cat(256,16)→128→1 │←── raw scalars
     │   └───────────────────┘    └────────────────────┘
 ```
 
@@ -234,7 +234,7 @@ MohaNetlight/
 | `LSTMCore` | LSTM(512→256, 2 capas, dropout=0.1) | ~1.31M |
 | `CardHead` | MLP 384→128→9 con contexto entidad | ~55K |
 | `SpatialDecoder` | FiLM conditioning + 2 ResBlocks → 32×18 logits | ~180K |
-| `ValueHead` | MLP 256→128→64→1 (crítico) | ~41K |
+| `ValueHead` | MLP cat(256,16)→128→64→1 (crítico + scalar baseline) | ~43K |
 | **Total** | | **~1.82M** |
 
 ### Cabezas autorregresivas + Decodificador espacial

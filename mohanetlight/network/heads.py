@@ -316,16 +316,22 @@ class TileYHead(nn.Module):
 
 
 class ValueHead(nn.Module):
-    """Critic value head — estimates V(s) from LSTM core output.
+    """Critic value head — estimates V(s) from LSTM output + raw scalars.
+
+    Following AlphaStar's baseline critic design, the value head receives
+    the LSTM hidden state concatenated with raw scalar features (tower HP,
+    elixir, time, flags) that are directly predictive of game outcome.
 
     Architecture::
 
-        Linear(256 → 128) → ReLU → Linear(128 → 64) → ReLU → Linear(64 → 1)
+        cat(core, scalars) → Linear(272 → 128) → ReLU
+                           → Linear(128 → 64)  → ReLU
+                           → Linear(64 → 1)
     """
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
-        h = cfg.lstm_hidden_dim
+        h = cfg.lstm_hidden_dim + cfg.scalar_dim  # 256 + 16 = 272
         self.mlp = nn.Sequential(
             nn.Linear(h, 128),
             nn.ReLU(inplace=True),
@@ -334,17 +340,20 @@ class ValueHead(nn.Module):
             nn.Linear(64, 1),
         )
 
-    def forward(self, core: Tensor) -> Tensor:
+    def forward(self, core: Tensor, scalars: Tensor) -> Tensor:
         """Compute state value.
 
         Parameters
         ----------
         core : Tensor
             ``(B, 256)`` LSTM output.
+        scalars : Tensor
+            ``(B, 16)`` raw scalar features (tower HP, elixir, time, flags).
 
         Returns
         -------
         Tensor
             ``(B,)`` scalar value estimate.
         """
-        return self.mlp(core).squeeze(-1)
+        x = torch.cat([core, scalars], dim=-1)  # (B, 272)
+        return self.mlp(x).squeeze(-1)
