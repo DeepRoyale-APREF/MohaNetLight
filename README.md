@@ -148,13 +148,19 @@ MohaNetlight/
 │   │   ├── heads.py             # CardHead, SpatialDecoder, ValueHead
 │   │   └── mohanet.py           # MohaNetLight (modelo ensamblado)
 │   ├── inference/
-│   │   └── agent.py             # MohaNetAgent (PlayerSlot para liga)
+│   │   ├── agent.py             # MohaNetAgent (PlayerSlot para liga)
+│   │   └── baseline_agent.py    # BaselineAgent (PlayerSlot para baselines)
+│   ├── baseline/
+│   │   ├── config.py            # BaselineConfig (arquitectura baselines)
+│   │   ├── conv_lstm.py         # ConvLSTMNet (~0.7M params)
+│   │   └── flat_mlp.py          # FlatMLPNet (~4M params)
 │   ├── bots/
 │   │   └── strategies.py        # 5 bots heurísticos parametrizados + default_bot_roster
 │   ├── training/
 │   │   ├── rollout.py           # RolloutBuffer con estados LSTM
-│   │   ├── ppo.py               # PPOTrainer (clipped surrogate + BPTT truncado)
+│   │   ├── ppo.py               # PPOTrainer (clipped surrogate + BPTT truncado + LR annealing)
 │   │   ├── trainer.py           # LeagueTrainer (orquestador completo)
+│   │   ├── baseline_trainer.py  # BaselineTrainer (mismo pipeline para baselines)
 │   │   └── reward_debugger.py   # RewardDebugger — diagnóstico de señales de recompensa
 │   └── utils/
 │       └── tensor_utils.py      # Conversión obs→tensores (incluye arena_map)
@@ -162,15 +168,18 @@ MohaNetlight/
 │   ├── __init__.py              # Exporta CurriculumTrainer, PhaseConfig, report generators
 │   ├── curriculum.py            # Entrenamiento por currículum (4 fases progresivas)
 │   ├── report.py                # Generador de gráficos (Retorno, Critic Loss, MA(50))
-│   └── run_curriculum.py        # Punto de entrada CLI para pipeline completo
+│   ├── run_curriculum.py        # Punto de entrada CLI para pipeline completo
+│   └── run_baseline.py          # Punto de entrada CLI para entrenar baselines
 ├── scripts/
 │   ├── train_league.py          # Entrenamiento PPO estándar por CLI
 │   ├── watch_agent.py           # Depurador visual — GUI + overlay de recompensas
-│   └── diagnose_rewards.py      # Diagnóstico headless de señales de recompensa
+│   ├── diagnose_rewards.py      # Diagnóstico headless de señales de recompensa
+│   └── compare_models.py        # Comparación MohaNet vs Baseline (torneo + métricas)
 ├── notebooks/
 │   └── colab_training.ipynb     # Configuración + entrenamiento en Google Colab
 ├── tests/
-│   └── test_network.py          # Tests (shapes, forward pass, buffer, bots)
+│   ├── test_network.py          # Tests (shapes, forward pass, buffer, bots)
+│   └── test_baseline.py         # Tests (baselines, trainer factory, agente)
 ├── pyproject.toml
 └── README.md
 ```
@@ -376,8 +385,8 @@ python scripts/watch_agent.py --no-music
 > los ticks de daño y las colisiones asumen ~33 ms por frame.
 > Reducir `fps` a 10 haría que las tropas se "teleportasen" distancias más
 > grandes y el daño se aplicara de forma brusca.
-> `frame_skip=3` mantiene la física a 30 fps (simulación precisa) y solo
-> pide una decisión RL cada 3 frames (10 decisiones/segundo).
+> `frame_skip=10` mantiene la física a 30 fps (simulación precisa) y solo
+> pide una decisión RL cada 10 frames (3 decisiones/segundo).
 > El script visual usa `frame_skip=1` para mostrar cada frame a velocidad real.
 
 El panel lateral muestra:
@@ -387,7 +396,7 @@ El panel lateral muestra:
 | **MATCH INFO** | Paso, tiempo transcurrido, fase del juego, elixir |
 | **AGENT ACTION** | Estrategia, carta, tile destino, si la acción fue válida, V(s) |
 | **REWARD** | Recompensa del paso, acumulada, episodios completados |
-| **Componentes** | Barras de cada componente (Damage, Elixir, Terminal, Strategy) |
+| **Componentes** | Barras de cada componente (Damage, Defensive, Elixir, Terminal) |
 | **REWARD HISTORY** | Sparkline de los últimos 200 pasos |
 | **TOWER HP** | HP de las 6 torres con colores por ratio |
 | **ENGINE SIGNALS** | Daño infligido/recibido, tropas en campo |
@@ -402,21 +411,21 @@ de recompensas. Útil para verificar señales de recompensa sin necesitar pantal
 python scripts/diagnose_rewards.py
 ```
 
-Salida esperada (modelo vs `BalancedBot`, 2560 pasos con `frame_skip=3`):
+Salida esperada (modelo vs `BalancedBot`, 2560 pasos con `frame_skip=10`):
 
 ```
-Episode ended at step 1205
-Episode ended at step 2218
+Episode ended at step 405
+Episode ended at step 810
 ============================================================
   REWARD DIAGNOSTIC — 2560 steps
 ============================================================
-  Sum:      243.199000     Mean:  0.095000
-  Nonzero:  1799/2560 (70.3%)
+  Sum:      12.340000     Mean:  0.005000
+  Nonzero:  890/2560 (34.8%)
   Per-component sums over 2560 steps:
-    DamageComponent    sum=+0.56   nonzero=121
-    ElixirComponent    sum=-28.30  nonzero=283
-    TerminalComponent  sum=+0.00   nonzero=6
-    StrategyComponent  sum=+270.94 nonzero=1690
+    DamageComponent     sum=+0.56   nonzero=121
+    DefensiveComponent  sum=+3.20   nonzero=85
+    ElixirComponent     sum=-1.44   nonzero=160
+    TerminalComponent   sum=+10.00  nonzero=6
 ```
 
 ---
@@ -446,6 +455,65 @@ for bot in bots:
 
 ---
 
+## Modelos Baseline
+
+Para comparación académica, el proyecto incluye dos arquitecturas baseline que comparten
+el mismo pipeline PPO, oponentes y protocolo de evaluación que MohaNetLight:
+
+| Modelo | Params | Recurrencia | Spatial | Descripción |
+|--------|--------|-------------|---------|-------------|
+| `ConvLSTMNet` | ~0.7M | LSTM 1 capa | MLP lineal | CNN arena + MLP features → LSTM → MLP heads |
+| `FlatMLPNet` | ~4M | Ninguna | MLP lineal | Flatten todo → 3-layer MLP (sin CNN ni LSTM) |
+| `MohaNetLight` | ~1.8M | LSTM 2 capas | FiLM decoder | Transformer entities + CNN arena + LSTM + FiLM spatial |
+
+### Entrenamiento de baselines
+
+```bash
+# Entrenar ConvLSTM con misma recompensa que MohaNet
+python train/run_baseline.py --model conv_lstm --output-dir logs/conv_lstm
+
+# Entrenar con recompensa sparse (ablation de reward shaping)
+python train/run_baseline.py --model conv_lstm --reward-preset sparse
+
+# Entrenar FlatMLP
+python train/run_baseline.py --model flat_mlp --output-dir logs/flat_mlp
+```
+
+### Comparación entre modelos
+
+```bash
+# Comparación head-to-head + torneo contra bots
+python scripts/compare_models.py \
+    --mohanet-ckpt logs/mohanet/mohanet_u200.pt \
+    --baseline-ckpt logs/conv_lstm/conv_lstm_u200.pt \
+    --baseline-type conv_lstm \
+    --matches-per-pair 10
+
+# Incluir curvas de aprendizaje
+python scripts/compare_models.py \
+    --mohanet-ckpt logs/mohanet/mohanet_u200.pt \
+    --baseline-ckpt logs/conv_lstm/conv_lstm_u200.pt \
+    --mohanet-metrics logs/mohanet/metrics.json \
+    --baseline-metrics logs/conv_lstm/metrics.json \
+    --output-dir logs/comparison
+```
+
+### Uso programático
+
+```python
+from mohanetlight.inference.baseline_agent import BaselineAgent
+
+# Cargar baseline desde checkpoint
+agent = BaselineAgent.from_checkpoint(
+    "logs/conv_lstm/conv_lstm_u200.pt",
+    model_type="conv_lstm",
+    name="ConvLSTM-v1",
+    device="cuda",
+)
+```
+
+---
+
 ## Estructura del proyecto
 
 ```
@@ -459,13 +527,19 @@ MohaNetlight/
 │   │   ├── heads.py             # CardHead, SpatialDecoder, ValueHead
 │   │   └── mohanet.py           # MohaNetLight (modelo ensamblado)
 │   ├── inference/
-│   │   └── agent.py             # MohaNetAgent (PlayerSlot para liga)
+│   │   ├── agent.py             # MohaNetAgent (PlayerSlot para liga)
+│   │   └── baseline_agent.py    # BaselineAgent (PlayerSlot para baselines)
+│   ├── baseline/
+│   │   ├── config.py            # BaselineConfig (arquitectura baselines)
+│   │   ├── conv_lstm.py         # ConvLSTMNet (~0.7M params)
+│   │   └── flat_mlp.py          # FlatMLPNet (~4M params)
 │   ├── bots/
 │   │   └── strategies.py        # 5 bots heurísticos parametrizados + default_bot_roster
 │   ├── training/
 │   │   ├── rollout.py           # RolloutBuffer con estados LSTM
-│   │   ├── ppo.py               # PPOTrainer (clipped surrogate + BPTT truncado)
+│   │   ├── ppo.py               # PPOTrainer (clipped surrogate + BPTT truncado + LR annealing)
 │   │   ├── trainer.py           # LeagueTrainer (orquestador completo)
+│   │   ├── baseline_trainer.py  # BaselineTrainer (mismo pipeline para baselines)
 │   │   └── reward_debugger.py   # RewardDebugger — diagnóstico de señales de recompensa
 │   └── utils/
 │       └── tensor_utils.py      # Conversión obs→tensores (incluye arena_map)
@@ -473,15 +547,18 @@ MohaNetlight/
 │   ├── __init__.py              # Exporta CurriculumTrainer, PhaseConfig, report generators
 │   ├── curriculum.py            # Entrenamiento por currículum (4 fases progresivas)
 │   ├── report.py                # Generador de gráficos (Retorno, Critic Loss, MA(50))
-│   └── run_curriculum.py        # Punto de entrada CLI para pipeline completo
+│   ├── run_curriculum.py        # Punto de entrada CLI para pipeline completo
+│   └── run_baseline.py          # Punto de entrada CLI para entrenar baselines
 ├── scripts/
 │   ├── train_league.py          # Entrenamiento PPO estándar por CLI
 │   ├── watch_agent.py           # Depurador visual — GUI + overlay de recompensas
-│   └── diagnose_rewards.py      # Diagnóstico headless de señales de recompensa
+│   ├── diagnose_rewards.py      # Diagnóstico headless de señales de recompensa
+│   └── compare_models.py        # Comparación MohaNet vs Baseline (torneo + métricas)
 ├── notebooks/
 │   └── colab_training.ipynb     # Configuración + entrenamiento en Google Colab
 ├── tests/
-│   └── test_network.py          # Tests (shapes, forward pass, buffer, bots)
+│   ├── test_network.py          # Tests (shapes, forward pass, buffer, bots)
+│   └── test_baseline.py         # Tests (baselines, trainer factory, agente)
 ├── pyproject.toml
 └── README.md
 ```
@@ -557,8 +634,8 @@ generate_full_report(all_metrics, "./logs/curriculum/reports")
 | Parámetro | Valor por defecto | Descripción |
 |-----------|-------------------|-------------|
 | `total_timesteps` | 1,000,000 | Pasos totales de entrenamiento |
-| `n_steps` | 2,560 | Pasos por rollout (≈ 1 partida completa a 10 decisiones/s) |
-| `frame_skip` | 3 | Frames de motor por decisión RL (30 fps ÷ 3 = 10 Hz) |
+| `n_steps` | 2,048 | Pasos por rollout (≈ 3-4 partidas completas a 3 decisiones/s) |
+| `frame_skip` | 10 | Frames de motor por decisión RL (30 fps ÷ 10 = 3 Hz) |
 | `n_epochs` | 4 | Épocas PPO por actualización |
 | `batch_chunk_len` | 32 | Longitud de secuencia para BPTT truncado |
 | `gamma` | 0.99 | Factor de descuento |
@@ -567,12 +644,26 @@ generate_full_report(all_metrics, "./logs/curriculum/reports")
 | `vf_coef` | 0.5 | Coeficiente de pérdida del valor |
 | `ent_coef` | 0.01 | Coeficiente de bonus de entropía |
 | `max_grad_norm` | 0.5 | Norma máxima del gradiente |
-| `lr` | 3e-4 | Tasa de aprendizaje (Adam) |
+| `lr` | 3e-4 | Tasa de aprendizaje inicial (Adam, con annealing lineal) |
+| LR annealing | lineal → 0 | `lr × (1 - progress)` con piso en 1e-7 |
 
-> **¿Por qué `n_steps=2560`?**
+> **¿Por qué `n_steps=2048`?**
 > Una partida completa dura hasta 240 s (180 s regulares + 60 s de tiempo extra).
-> A 30 fps con `frame_skip=3` eso equivale a `240 × 30 / 3 = 2400` pasos RL.
-> Los 2560 proveen margen para al menos una partida completa por rollout.
+> A 30 fps con `frame_skip=10` eso equivale a `240 × 30 / 10 = 720` pasos RL.
+> Con `n_steps=2048` cada rollout cubre ~3 partidas completas, reduciendo la
+> varianza por update y estabilizando el entrenamiento.
+
+> **Rollouts de longitud fija:**
+> El buffer recolecta exactamente `n_steps` transiciones por update,
+> independientemente de los límites de episodio.  Los episodios que
+> terminan a mitad del rollout se resetean normalmente y GAE computa
+> el bootstrap correctamente.  Esto garantiza que cada update de PPO
+> procese el mismo volumen de datos, evitando gradientes erráticos.
+
+> **Normalización de ventajas a nivel de rollout:**
+> Las ventajas (advantages) se normalizan una sola vez sobre el buffer
+> completo antes de las épocas de PPO, en vez de por chunk de 32 pasos.
+> Esto da estadísticas más estables, especialmente cerca de límites de episodio.
 
 ---
 
@@ -601,7 +692,7 @@ generate_full_report(all_metrics, "./logs/curriculum/reports")
 ## Tests
 
 ```bash
-# Ejecutar todos los tests
+# Ejecutar todos los tests (68 tests)
 pytest tests/ -v
 
 # Solo tests de la red neuronal
@@ -609,6 +700,9 @@ pytest tests/test_network.py::TestMohaNetLight -v
 
 # Solo tests de los bots heurísticos
 pytest tests/test_network.py::TestBots -v
+
+# Solo tests de baselines (ConvLSTM, FlatMLP, BaselineAgent, BaselineTrainer)
+pytest tests/test_baseline.py -v
 ```
 
 ---
