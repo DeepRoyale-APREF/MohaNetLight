@@ -72,6 +72,7 @@ class PPOTrainer:
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
+        total_entropy_choice = 0.0
         total_kl = 0.0
         total_clip_frac = 0.0
         n_chunks = 0
@@ -82,6 +83,7 @@ class PPOTrainer:
                 total_policy_loss += metrics["policy_loss"]
                 total_value_loss += metrics["value_loss"]
                 total_entropy += metrics["entropy"]
+                total_entropy_choice += metrics["entropy_choice"]
                 total_kl += metrics["approx_kl"]
                 total_clip_frac += metrics["clip_fraction"]
                 n_chunks += 1
@@ -91,6 +93,7 @@ class PPOTrainer:
             "policy_loss": total_policy_loss / n_chunks,
             "value_loss": total_value_loss / n_chunks,
             "entropy": total_entropy / n_chunks,
+            "entropy_choice": total_entropy_choice / n_chunks,
             "approx_kl": total_kl / n_chunks,
             "clip_fraction": total_clip_frac / n_chunks,
             "lr": lr_now,
@@ -162,7 +165,10 @@ class PPOTrainer:
         # ── Value loss (clipped) ──────────────────────────────────────────
         # Clip per-sample value error to prevent enormous early gradients
         # from the critic drowning the entropy bonus signal.
-        value_error = (new_values - returns).clamp(-10.0, 10.0)
+        # With clamp ±3 → max per-sample loss = 9, mean ≈ 5-9 early on.
+        # Combined with vf_coef=0.25 → value gradient ≈ 1-2, comparable
+        # to entropy bonus (ent_coef=0.05 × H≈8.5 = 0.425).
+        value_error = (new_values - returns).clamp(-3.0, 3.0)
         value_loss = (value_error ** 2).mean()
 
         # ── Entropy bonus ─────────────────────────────────────────────────
@@ -185,10 +191,18 @@ class PPOTrainer:
             approx_kl = ((ratio - 1) - ratio.log()).mean().item()
             clip_frac = ((ratio - 1.0).abs() > self.cfg.clip_eps).float().mean().item()
 
+            # Entropy conditioned on having a real choice (not pure-noop)
+            has_choice = entropy > 0.01  # steps where at least 2 actions valid
+            if has_choice.any():
+                entropy_when_choosing = entropy[has_choice].mean().item()
+            else:
+                entropy_when_choosing = 0.0
+
         return {
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss.item(),
             "entropy": entropy.mean().item(),
+            "entropy_choice": entropy_when_choosing,
             "approx_kl": approx_kl,
             "clip_fraction": clip_frac,
         }

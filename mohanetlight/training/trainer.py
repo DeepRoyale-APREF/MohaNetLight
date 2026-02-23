@@ -387,6 +387,7 @@ class LeagueTrainer:
         pl = metrics.get("policy_loss", 0)
         vl = metrics.get("value_loss", 0)
         ent = metrics.get("entropy", 0)
+        ent_c = metrics.get("entropy_choice", 0)
         opp = metrics.get("opponent", "?")
 
         # Actual per-step reward stats (not episode-gated)
@@ -399,7 +400,7 @@ class LeagueTrainer:
 
         print(
             f"[u{u:4d}] sps={sps:.0f}  \u03c0={pl:.4f}  v={vl:.4f}  "
-            f"H={ent:.3f}  SR={r_sum:+.3f}  mR={r_mean:+.5f}  "
+            f"H={ent:.3f}  Hc={ent_c:.3f}  SR={r_sum:+.3f}  mR={r_mean:+.5f}  "
             f"|R|={r_abs:.5f}  nz={r_nz:.0%}  ep={n_eps}  "
             f"epR={mr:+.3f}  vs={opp}",
             flush=True,
