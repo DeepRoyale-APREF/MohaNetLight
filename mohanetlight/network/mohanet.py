@@ -214,8 +214,12 @@ class MohaNetLight(nn.Module):
         pos_out = masked_categorical(pos_logits, spatial_mask, action=position)
 
         # ── Aggregated log-prob & entropy ────────────────────────────────
-        log_prob = card_out.log_prob + pos_out.log_prob
-        entropy = card_out.entropy + pos_out.entropy
+        # Zero out spatial contribution for noop — position is meaningless
+        # when no card is played, so its gradient is pure noise.
+        noop_idx = self.cfg.n_card_options - 1
+        is_play = (card_action != noop_idx).float()  # (B,)
+        log_prob = card_out.log_prob + pos_out.log_prob * is_play
+        entropy = card_out.entropy + pos_out.entropy * is_play
 
         value = self.value_head(core_out, scalars)
 
@@ -270,23 +274,35 @@ class MohaNetLight(nn.Module):
 
         # ── Spatial position ─────────────────────────────────────────────
         card_action = card_out.action
-        spatial_mask = action_masks["spatial_per_card"][
-            torch.arange(B, device=card_action.device), card_action
-        ]
-        pos_logits = self.spatial_decoder(arena_features, core_out, card_emb)
-        pos_out = masked_categorical(pos_logits, spatial_mask)
+        noop_idx = self.cfg.n_card_options - 1
+        is_noop = (card_action == noop_idx)
 
-        # Convert flat position → tile_x, tile_y
-        tile_y = pos_out.action // self.cfg.n_tile_x
-        tile_x = pos_out.action % self.cfg.n_tile_x
+        if is_noop.all():
+            # Skip spatial decoder entirely — position is unused for noop
+            tile_x = torch.zeros(B, dtype=torch.long, device=card_action.device)
+            tile_y = torch.zeros(B, dtype=torch.long, device=card_action.device)
+            spatial_lp = torch.zeros(B, device=card_action.device)
+            spatial_ent = torch.zeros(B, device=card_action.device)
+        else:
+            spatial_mask = action_masks["spatial_per_card"][
+                torch.arange(B, device=card_action.device), card_action
+            ]
+            pos_logits = self.spatial_decoder(arena_features, core_out, card_emb)
+            pos_out = masked_categorical(pos_logits, spatial_mask)
+            tile_y = pos_out.action // self.cfg.n_tile_x
+            tile_x = pos_out.action % self.cfg.n_tile_x
+            # Zero out spatial contribution for noop
+            is_play = (~is_noop).float()
+            spatial_lp = pos_out.log_prob * is_play
+            spatial_ent = pos_out.entropy * is_play
 
         actions = {
             "card": card_out.action,
             "tile_x": tile_x,
             "tile_y": tile_y,
         }
-        log_prob = card_out.log_prob + pos_out.log_prob
-        entropy = card_out.entropy + pos_out.entropy
+        log_prob = card_out.log_prob + spatial_lp
+        entropy = card_out.entropy + spatial_ent
         value = self.value_head(core_out, scalars)
 
         return ModelOutput(
