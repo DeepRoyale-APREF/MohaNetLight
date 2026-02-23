@@ -79,6 +79,16 @@ def parse_args() -> argparse.Namespace:
         help="Skip the self-play phase (useful for quick runs)",
     )
     p.add_argument(
+        "--resume-from", type=str, default=None,
+        help="Path to a .pt checkpoint to resume from (loads weights before "
+             "the starting phase). Example: logs/curriculum/phase_1_balanced/mohanet_u250.pt",
+    )
+    p.add_argument(
+        "--start-phase", type=int, default=1,
+        help="1-indexed phase to start from (default: 1). "
+             "Phases before this are skipped. Use with --resume-from.",
+    )
+    p.add_argument(
         "--ma-window", type=int, default=50,
         help="Moving average window for report plots (default: 50)",
     )
@@ -123,9 +133,18 @@ def main() -> None:
 
     def run_with_self_play() -> dict:
         """Run curriculum, injecting self-play opponent between phases."""
-        last_checkpoint = None
+        last_checkpoint = args.resume_from  # initialise from CLI flag
+        start_idx = max(0, args.start_phase - 1)  # 1-indexed → 0-indexed
+
+        if start_idx > 0:
+            print(f"  Skipping phases 1–{start_idx} (starting at phase {start_idx + 1})")
+            if last_checkpoint:
+                print(f"  Resuming weights from: {last_checkpoint}")
 
         for i, phase in enumerate(trainer.phases):
+            if i < start_idx:
+                continue  # skip completed phases
+
             phase_dir = trainer.base_log_dir / f"phase_{i + 1}_{phase.name}"
             phase_dir.mkdir(parents=True, exist_ok=True)
 
