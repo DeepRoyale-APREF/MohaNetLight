@@ -201,12 +201,12 @@ class LeagueTrainer:
 
         # Keep collecting until we have enough steps AND are at an episode boundary
         while step < self.train_cfg.n_steps or (step > 0 and not self.buffer.dones[-1]):
-            scalars, troops, troop_mask, cards, action_masks = obs_to_tensors(
+            scalars, troops, troop_mask, cards, arena_map, action_masks = obs_to_tensors(
                 obs, device=self.device,
             )
 
             output = self.model.act(
-                scalars, troops, troop_mask, cards, action_masks, hidden,
+                scalars, troops, troop_mask, cards, arena_map, action_masks, hidden,
             )
 
             # Store transition
@@ -252,8 +252,8 @@ class LeagueTrainer:
 
         # Bootstrap value for last state
         with torch.no_grad():
-            s, tr, m, c, am = obs_to_tensors(obs, device=self.device)
-            last_output = self.model.act(s, tr, m, c, am, hidden)
+            s, tr, m, c, am_map, am = obs_to_tensors(obs, device=self.device)
+            last_output = self.model.act(s, tr, m, c, am_map, am, hidden)
             last_value = last_output.value.item()
 
         self.buffer.finish(last_value)

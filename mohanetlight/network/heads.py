@@ -1,14 +1,13 @@
-"""Hierarchical action heads and value head.
+"""Hierarchical action heads, spatial decoder, and value head.
 
-Autoregressive heads: each head's *sampled* output is embedded and fed
-as additional context to the next head.
+Autoregressive heads: the card head's *sampled* output is embedded and
+fed as conditioning to the spatial decoder which selects a 2-D position.
 
-Connections per head
---------------------
-- **Card**   ← core + entity_context
-- **Tile X** ← core + card_embed   + entity_context
-- **Tile Y** ← core + tile_x_embed + entity_context
-- **Value**  ← core  (critic, no action conditioning)
+Connections
+-----------
+- **Card**    ← core + entity_context
+- **Spatial** ← CNN feature maps + FiLM(core, card_embed)
+- **Value**   ← core  (critic, no action conditioning)
 """
 
 from __future__ import annotations
@@ -154,7 +153,111 @@ class CardHead(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ② Tile X Head
+# ② Spatial Decoder (ResNet-style — replaces TileX + TileY heads)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class _ResBlock2d(nn.Module):
+    """Simple 2-D residual block: Conv→BN→ReLU→Conv→BN + skip."""
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.relu(self.block(x) + x)
+
+
+class SpatialDecoder(nn.Module):
+    """ResNet-based spatial decoder that outputs per-tile logits.
+
+    Receives CNN feature maps from the ArenaEncoder and conditions them
+    on the LSTM core output + selected-card embedding via FiLM
+    (Feature-wise Linear Modulation).
+
+    Architecture::
+
+        FiLM conditioning: Linear(core + card_emb → 2 × C_feat) → γ, β
+        feat_maps = γ * feat_maps + β          (B, 64, 32, 18)
+        → ResBlock(64)
+        → Conv(64 → 32, 3, pad=1) + BN + ReLU
+        → ResBlock(32)
+        → Conv(32 → 1, 1)                     (B, 1, 32, 18)
+        → flatten → (B, 576)
+
+    Parameters
+    ----------
+    cfg : ModelConfig
+        Architecture configuration.
+    """
+
+    def __init__(self, cfg: ModelConfig) -> None:
+        super().__init__()
+        C = cfg.arena_cnn_dim  # 64
+
+        # FiLM conditioning: project (core + card_emb) → γ, β
+        self.film = nn.Linear(cfg.spatial_condition_dim, C * 2)
+
+        # Decoder body
+        self.res1 = _ResBlock2d(C)
+        ch2 = cfg.spatial_decoder_channels[-1]  # 32
+        self.down = nn.Sequential(
+            nn.Conv2d(C, ch2, 3, padding=1, bias=False),
+            nn.BatchNorm2d(ch2),
+            nn.ReLU(inplace=True),
+        )
+        self.res2 = _ResBlock2d(ch2)
+        self.out_conv = nn.Conv2d(ch2, 1, kernel_size=1)
+
+    def forward(
+        self,
+        feat_maps: Tensor,
+        core: Tensor,
+        card_emb: Tensor,
+    ) -> Tensor:
+        """Produce per-tile logits for position selection.
+
+        Parameters
+        ----------
+        feat_maps : Tensor
+            ``(B, C_feat, H, W)`` from ArenaEncoder.
+        core : Tensor
+            ``(B, 256)`` LSTM core output.
+        card_emb : Tensor
+            ``(B, 64)`` embedded card action.
+
+        Returns
+        -------
+        Tensor
+            ``(B, H*W)`` flat spatial logits (576 = 32 × 18).
+        """
+        B, C, H, W = feat_maps.shape
+
+        # FiLM conditioning
+        cond = torch.cat([core, card_emb], dim=-1)  # (B, 320)
+        film_params = self.film(cond)                 # (B, 2*C)
+        gamma = film_params[:, :C].view(B, C, 1, 1)
+        beta = film_params[:, C:].view(B, C, 1, 1)
+        x = gamma * feat_maps + beta  # (B, C, H, W)
+
+        # Decoder
+        x = self.res1(x)       # (B, 64, H, W)
+        x = self.down(x)       # (B, 32, H, W)
+        x = self.res2(x)       # (B, 32, H, W)
+        x = self.out_conv(x)   # (B, 1, H, W)
+
+        return x.view(B, -1)   # (B, H*W)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Legacy Tile Heads (kept for backward compatibility / reference)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 

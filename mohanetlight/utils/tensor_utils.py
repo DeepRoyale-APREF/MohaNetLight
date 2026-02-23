@@ -12,7 +12,7 @@ from torch import Tensor
 def obs_to_tensors(
     obs: Dict[str, np.ndarray | Dict[str, np.ndarray]],
     device: torch.device | str = "cpu",
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]:
     """Convert a gymnasium observation dict to batched PyTorch tensors.
 
     Parameters
@@ -20,7 +20,8 @@ def obs_to_tensors(
     obs : dict
         Gymnasium Dict observation with keys:
         ``troops (100,14)``, ``troop_mask (100,)``, ``scalars (16,)``,
-        ``cards (8,5)``, ``action_mask {card, tile_x_per_card, tile_y_per_card}``.
+        ``cards (8,5)``, ``arena_map (8,32,18)``,
+        ``action_mask {card, tile_x_per_card, tile_y_per_card, spatial_per_card}``.
     device : str | torch.device
         Target device.
 
@@ -30,6 +31,7 @@ def obs_to_tensors(
     troops : Tensor ``(1, 100, 14)``
     troop_mask : Tensor ``(1, 100)`` bool
     cards : Tensor ``(1, 8, 5)``
+    arena_map : Tensor ``(1, 8, 32, 18)``
     action_masks : dict[str, Tensor]
         Each mask is unsqueezed to add a batch dim.
     """
@@ -37,6 +39,9 @@ def obs_to_tensors(
     troops = torch.as_tensor(obs["troops"], dtype=torch.float32, device=device).unsqueeze(0)
     troop_mask = torch.as_tensor(obs["troop_mask"], dtype=torch.bool, device=device).unsqueeze(0)
     cards = torch.as_tensor(obs["cards"], dtype=torch.float32, device=device).unsqueeze(0)
+    arena_map = torch.as_tensor(
+        obs["arena_map"], dtype=torch.float32, device=device,
+    ).unsqueeze(0)
 
     mask_dict = obs["action_mask"]
     action_masks = {
@@ -44,13 +49,13 @@ def obs_to_tensors(
         for k, v in mask_dict.items()
     }
 
-    return scalars, troops, troop_mask, cards, action_masks
+    return scalars, troops, troop_mask, cards, arena_map, action_masks
 
 
 def batch_obs(
     obs_list: list[Dict[str, np.ndarray | Dict[str, np.ndarray]]],
     device: torch.device | str = "cpu",
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]:
     """Stack a list of observations into batched tensors.
 
     Parameters
@@ -69,6 +74,7 @@ def batch_obs(
     troops = torch.zeros(n, *obs_list[0]["troops"].shape, device=device)
     troop_mask = torch.zeros(n, obs_list[0]["troop_mask"].shape[0], dtype=torch.bool, device=device)
     cards = torch.zeros(n, *obs_list[0]["cards"].shape, device=device)
+    arena_map = torch.zeros(n, *obs_list[0]["arena_map"].shape, device=device)
 
     mask_keys = list(obs_list[0]["action_mask"].keys())
     action_masks: Dict[str, Tensor] = {
@@ -81,6 +87,7 @@ def batch_obs(
         troops[i] = torch.as_tensor(obs["troops"], dtype=torch.float32)
         troop_mask[i] = torch.as_tensor(obs["troop_mask"], dtype=torch.bool)
         cards[i] = torch.as_tensor(obs["cards"], dtype=torch.float32)
+        arena_map[i] = torch.as_tensor(obs["arena_map"], dtype=torch.float32)
         for k in mask_keys:
             action_masks[k][i] = torch.as_tensor(obs["action_mask"][k], dtype=torch.bool)
 
@@ -89,6 +96,7 @@ def batch_obs(
         troops.to(device),
         troop_mask.to(device),
         cards.to(device),
+        arena_map.to(device),
         {k: v.to(device) for k, v in action_masks.items()},
     )
 
@@ -96,7 +104,7 @@ def batch_obs(
 def state_to_obs_tensors(
     state: "State",  # noqa: F821  — avoid circular import
     device: torch.device | str = "cpu",
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]:
     """Convert a raw engine :class:`State` directly to tensors.
 
     This is used by the :class:`MohaNetAgent` during league play where the
@@ -210,15 +218,22 @@ def state_to_obs_tensors(
         enemy_right_princess_dead=right_dead,
     )
 
+    # ── Arena map ─────────────────────────────────────────────────────────
+    from clash_royale_gymnasium.utils.encoder import _build_arena_map
+
+    arena_map_np = _build_arena_map(state)
+
     obs: Dict[str, np.ndarray | Dict[str, np.ndarray]] = {
         "scalars": scalar_arr,
         "troops": troop_arr,
         "troop_mask": mask_arr,
         "cards": cards_arr,
+        "arena_map": arena_map_np,
         "action_mask": {
             "card": masks.card,
             "tile_x_per_card": masks.tile_x_per_card,
             "tile_y_per_card": masks.tile_y_per_card,
+            "spatial_per_card": masks.spatial_per_card,
         },
     }
     return obs_to_tensors(obs, device)

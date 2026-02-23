@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 class ModelConfig:
     """Architecture hyperparameters for MohaNetLight.
 
-    Total ≈ 1.6M parameters — fits comfortably in Google Colab free tier.
+    Total ≈ 1.8M parameters — fits comfortably in Google Colab free tier.
 
     Dimensions
     ----------
@@ -25,10 +25,23 @@ class ModelConfig:
     deck_size : int
         Number of cards in the deck (8 in Clash Royale).
 
+    Arena CNN
+    ---------
+    arena_channels : int
+        Number of input channels in the arena spatial map.
+    arena_h : int
+        Arena height in tiles.
+    arena_w : int
+        Arena width in tiles.
+    arena_cnn_channels : list[int]
+        Channel sizes for each CNN layer in ArenaEncoder.
+    arena_cnn_dim : int
+        Internal feature-map channel count passed to the SpatialDecoder.
+
     Encoder
     -------
     encoder_dim : int
-        Output dimension of each encoder (scalar, entity, card).
+        Output dimension of each encoder (scalar, entity, card, arena).
     entity_model_dim : int
         Internal dimension of the entity transformer.
     entity_n_heads : int
@@ -52,9 +65,9 @@ class ModelConfig:
     head_hidden_dim : int
         Hidden dimension inside action heads.
     embedding_dim : int
-        Dimension of sampled-action embeddings (card, tile_x).
+        Dimension of sampled-action embeddings (card).
     embedding_proj_dim : int
-        Projected embedding dimension fed to next head.
+        Projected embedding dimension fed to spatial decoder.
 
     Action Space
     ------------
@@ -64,6 +77,8 @@ class ModelConfig:
         Number of tile columns.
     n_tile_y : int
         Number of tile rows.
+    n_position : int
+        Total spatial positions (n_tile_x × n_tile_y = 576).
     """
 
     # Input dims (from cr-gym)
@@ -72,6 +87,13 @@ class ModelConfig:
     card_feature_dim: int = 5
     max_troops: int = 100
     deck_size: int = 8
+
+    # Arena CNN
+    arena_channels: int = 8
+    arena_h: int = 32
+    arena_w: int = 18
+    arena_cnn_channels: tuple[int, ...] = (32, 64, 64)
+    arena_cnn_dim: int = 64  # feature map depth for spatial decoder
 
     # Encoder dims
     encoder_dim: int = 128
@@ -90,15 +112,28 @@ class ModelConfig:
     embedding_dim: int = 32
     embedding_proj_dim: int = 64
 
+    # Spatial decoder
+    spatial_decoder_channels: tuple[int, ...] = (64, 32)
+
     # Action space sizes
     n_card_options: int = 9   # 8 deck + noop
     n_tile_x: int = 18
     n_tile_y: int = 32
 
     @property
+    def n_position(self) -> int:
+        """Total flat spatial positions = n_tile_x × n_tile_y."""
+        return self.n_tile_x * self.n_tile_y
+
+    @property
+    def n_encoders(self) -> int:
+        """Number of input encoders: scalar + entity + card + arena."""
+        return 4
+
+    @property
     def concat_encoder_dim(self) -> int:
-        """Concatenated encoder output: scalar + entity + card."""
-        return self.encoder_dim * 3
+        """Concatenated encoder output: scalar + entity + card + arena."""
+        return self.encoder_dim * self.n_encoders
 
     @property
     def card_head_input_dim(self) -> int:
@@ -109,6 +144,11 @@ class ModelConfig:
     def head_input_dim(self) -> int:
         """Input to tile heads: core + prev_embedding + entity_context."""
         return self.lstm_hidden_dim + self.embedding_proj_dim + self.encoder_dim
+
+    @property
+    def spatial_condition_dim(self) -> int:
+        """Conditioning vector for spatial decoder: core + card_embed."""
+        return self.lstm_hidden_dim + self.embedding_proj_dim
 
 
 @dataclass

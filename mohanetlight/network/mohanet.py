@@ -1,17 +1,21 @@
-"""MohaNetLight — assembled actor-critic network.
+"""MohaNetLight — assembled actor-critic network with spatial CNN.
 
 Dataflow
 --------
-1. Encode inputs in parallel:  ScalarEncoder, EntityEncoder, CardEncoder
-2. Concatenate → 384-dim  →  LSTMCore  →  256-dim core output
+1. Encode inputs in parallel:
+   ScalarEncoder, EntityEncoder, CardEncoder, **ArenaEncoder** (CNN)
+2. Concatenate → 512-dim  →  LSTMCore  →  256-dim core output
 3. Hierarchical action heads (autoregressive):
-   card  →  tile_x  →  tile_y
+   card  →  **SpatialDecoder** (ResNet) → position (tile_x, tile_y)
 4. Value head (critic) reads core output only.
+
+The ArenaEncoder additionally produces full-resolution feature maps
+that are passed to the SpatialDecoder for position selection.
 
 The network exposes two main entry points:
 
-* ``forward()``  — training: given stored actions, returns log-probs / values / entropy.
-* ``act()``      — inference: sample new actions, return dict + log-prob + value.
+* ``evaluate_actions()``  — training: given stored actions, returns log-probs / values / entropy.
+* ``act()``               — inference: sample new actions, return dict + log-prob + value.
 """
 
 from __future__ import annotations
@@ -24,13 +28,17 @@ from torch import Tensor
 
 from mohanetlight.config import ModelConfig
 from mohanetlight.network.core import LSTMCore, LSTMState
-from mohanetlight.network.encoders import CardEncoder, EntityEncoder, ScalarEncoder
+from mohanetlight.network.encoders import (
+    ArenaEncoder,
+    CardEncoder,
+    EntityEncoder,
+    ScalarEncoder,
+)
 from mohanetlight.network.heads import (
     ActionEmbedding,
     CardHead,
     HeadOutput,
-    TileXHead,
-    TileYHead,
+    SpatialDecoder,
     ValueHead,
     masked_categorical,
 )
@@ -49,12 +57,15 @@ class ModelOutput(NamedTuple):
 class MohaNetLight(nn.Module):
     """Lightweight AlphaStar-inspired actor-critic for Clash Royale.
 
+    Features a CNN arena encoder and a ResNet spatial decoder for
+    position selection, replacing the old TileX / TileY MLP heads.
+
     Parameters
     ----------
     cfg : ModelConfig
         Frozen dataclass with all architecture dimensions.
 
-    Approximate parameter count: **≈ 1.6 M** — trainable on Colab free GPU.
+    Approximate parameter count: **≈ 1.8 M** — trainable on Colab free GPU.
     """
 
     def __init__(self, cfg: ModelConfig | None = None) -> None:
@@ -67,22 +78,21 @@ class MohaNetLight(nn.Module):
         self.scalar_enc = ScalarEncoder(cfg)
         self.entity_enc = EntityEncoder(cfg)
         self.card_enc = CardEncoder(cfg)
+        self.arena_enc = ArenaEncoder(cfg)
 
         # ── LSTM Core ────────────────────────────────────────────────────
         self.core = LSTMCore(cfg)
 
-        # ── Hierarchical Action Heads ────────────────────────────────────
+        # ── Card Head ────────────────────────────────────────────────────
         self.card_head = CardHead(cfg)
-        self.tile_x_head = TileXHead(cfg)
-        self.tile_y_head = TileYHead(cfg)
 
-        # ── Action Embeddings (autoregressive links) ─────────────────────────────
+        # ── Card Action Embedding (autoregressive link to spatial decoder)
         self.card_embed = ActionEmbedding(
             cfg.n_card_options, cfg.embedding_dim, cfg.embedding_proj_dim,
         )
-        self.tile_x_embed = ActionEmbedding(
-            cfg.n_tile_x, cfg.embedding_dim, cfg.embedding_proj_dim,
-        )
+
+        # ── Spatial Decoder (ResNet) — replaces TileX + TileY heads ─────
+        self.spatial_decoder = SpatialDecoder(cfg)
 
         # ── Value Head (critic) ──────────────────────────────────────────
         self.value_head = ValueHead(cfg)
@@ -112,21 +122,25 @@ class MohaNetLight(nn.Module):
         troops: Tensor,
         troop_mask: Tensor,
         cards: Tensor,
-    ) -> Tuple[Tensor, Tensor]:
-        """Run the three input encoders.
+        arena_map: Tensor,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """Run the four input encoders.
 
         Returns
         -------
         concat : Tensor
-            ``(B, 384)`` concatenated encoder outputs.
+            ``(B, 512)`` concatenated encoder outputs.
         entity_ctx : Tensor
-            ``(B, 128)`` entity context for head skip connections.
+            ``(B, 128)`` entity context for card head skip connection.
+        arena_features : Tensor
+            ``(B, C_feat, H, W)`` spatial features for the SpatialDecoder.
         """
-        s = self.scalar_enc(scalars)           # (B, 128)
-        e = self.entity_enc(troops, troop_mask)  # (B, 128)
-        c = self.card_enc(cards)               # (B, 128)
-        concat = torch.cat([s, e, c], dim=-1)  # (B, 384)
-        return concat, e
+        s = self.scalar_enc(scalars)                      # (B, 128)
+        e = self.entity_enc(troops, troop_mask)            # (B, 128)
+        c = self.card_enc(cards)                           # (B, 128)
+        a_emb, arena_features = self.arena_enc(arena_map)  # (B, 128), (B, 64, H, W)
+        concat = torch.cat([s, e, c, a_emb], dim=-1)      # (B, 512)
+        return concat, e, arena_features
 
     # ------------------------------------------------------------------
     # Training: evaluate given actions
@@ -138,6 +152,7 @@ class MohaNetLight(nn.Module):
         troops: Tensor,
         troop_mask: Tensor,
         cards: Tensor,
+        arena_map: Tensor,
         action_masks: Dict[str, Tensor],
         actions: Dict[str, Tensor],
         hidden: LSTMState,
@@ -152,8 +167,9 @@ class MohaNetLight(nn.Module):
         troops : Tensor   ``(B, 100, 14)``
         troop_mask : Tensor ``(B, 100)``
         cards : Tensor     ``(B, 8, 5)``
+        arena_map : Tensor ``(B, 8, 32, 18)``
         action_masks : Dict[str, Tensor]
-            ``card (B,9)  tile_x_per_card (B,9,18)  tile_y_per_card (B,9,32)``
+            ``card (B,9)  spatial_per_card (B,9,576)``
         actions : Dict[str, Tensor]
             ``card (B,)  tile_x (B,)  tile_y (B,)``
         hidden : LSTMState
@@ -166,7 +182,9 @@ class MohaNetLight(nn.Module):
         entropy : Tensor ``(B,)``
         new_hidden : LSTMState
         """
-        concat, entity_ctx = self._encode(scalars, troops, troop_mask, cards)
+        concat, entity_ctx, arena_features = self._encode(
+            scalars, troops, troop_mask, cards, arena_map,
+        )
 
         # LSTM forward — add time dimension T=1
         core_out, new_hidden = self.core(concat.unsqueeze(1), hidden)
@@ -179,30 +197,25 @@ class MohaNetLight(nn.Module):
         )
         card_emb = self.card_embed(actions["card"])
 
-        # ── Tile X (per-card mask) ───────────────────────────────────────
+        # ── Spatial position ─────────────────────────────────────────────
         B = core_out.size(0)
         card_action = actions["card"]
-        tx_mask = action_masks["tile_x_per_card"][torch.arange(B, device=card_action.device), card_action]
-        tx_logits = self.tile_x_head(core_out, card_emb, entity_ctx)
-        tx_out = masked_categorical(
-            tx_logits, tx_mask, action=actions["tile_x"],
-        )
-        tx_emb = self.tile_x_embed(actions["tile_x"])
 
-        # ── Tile Y (per-card mask) ───────────────────────────────────────
-        ty_mask = action_masks["tile_y_per_card"][torch.arange(B, device=card_action.device), card_action]
-        ty_logits = self.tile_y_head(core_out, tx_emb, entity_ctx)
-        ty_out = masked_categorical(
-            ty_logits, ty_mask, action=actions["tile_y"],
-        )
+        # Per-card spatial mask: (B, 576)
+        spatial_mask = action_masks["spatial_per_card"][
+            torch.arange(B, device=card_action.device), card_action
+        ]
+
+        # Spatial decoder logits
+        pos_logits = self.spatial_decoder(arena_features, core_out, card_emb)
+
+        # Convert stored tile_x/tile_y to flat position for evaluation
+        position = actions["tile_y"] * self.cfg.n_tile_x + actions["tile_x"]
+        pos_out = masked_categorical(pos_logits, spatial_mask, action=position)
 
         # ── Aggregated log-prob & entropy ────────────────────────────────
-        log_prob = (
-            card_out.log_prob + tx_out.log_prob + ty_out.log_prob
-        )
-        entropy = (
-            card_out.entropy + tx_out.entropy + ty_out.entropy
-        )
+        log_prob = card_out.log_prob + pos_out.log_prob
+        entropy = card_out.entropy + pos_out.entropy
 
         value = self.value_head(core_out)
 
@@ -219,6 +232,7 @@ class MohaNetLight(nn.Module):
         troops: Tensor,
         troop_mask: Tensor,
         cards: Tensor,
+        arena_map: Tensor,
         action_masks: Dict[str, Tensor],
         hidden: LSTMState,
     ) -> ModelOutput:
@@ -230,6 +244,7 @@ class MohaNetLight(nn.Module):
         troops : Tensor   ``(B, 100, 14)``
         troop_mask : Tensor ``(B, 100)``
         cards : Tensor     ``(B, 8, 5)``
+        arena_map : Tensor ``(B, 8, 32, 18)``
         action_masks : Dict[str, Tensor]
         hidden : LSTMState
 
@@ -237,41 +252,41 @@ class MohaNetLight(nn.Module):
         -------
         ModelOutput
             Named tuple with ``actions, log_prob, value, entropy, hidden``.
+            actions contains ``{card, tile_x, tile_y}`` for engine compat.
         """
-        concat, entity_ctx = self._encode(scalars, troops, troop_mask, cards)
+        concat, entity_ctx, arena_features = self._encode(
+            scalars, troops, troop_mask, cards, arena_map,
+        )
 
         core_out, new_hidden = self.core(concat.unsqueeze(1), hidden)
         core_out = core_out.squeeze(1)
 
         B = core_out.size(0)
 
-        # Autoregressive sampling
+        # ── Card ─────────────────────────────────────────────────────────
         card_logits = self.card_head(core_out, entity_ctx)
         card_out = masked_categorical(card_logits, action_masks["card"])
         card_emb = self.card_embed(card_out.action)
 
-        # Per-card tile masks
+        # ── Spatial position ─────────────────────────────────────────────
         card_action = card_out.action
-        tx_mask = action_masks["tile_x_per_card"][torch.arange(B, device=card_action.device), card_action]
-        tx_logits = self.tile_x_head(core_out, card_emb, entity_ctx)
-        tx_out = masked_categorical(tx_logits, tx_mask)
-        tx_emb = self.tile_x_embed(tx_out.action)
+        spatial_mask = action_masks["spatial_per_card"][
+            torch.arange(B, device=card_action.device), card_action
+        ]
+        pos_logits = self.spatial_decoder(arena_features, core_out, card_emb)
+        pos_out = masked_categorical(pos_logits, spatial_mask)
 
-        ty_mask = action_masks["tile_y_per_card"][torch.arange(B, device=card_action.device), card_action]
-        ty_logits = self.tile_y_head(core_out, tx_emb, entity_ctx)
-        ty_out = masked_categorical(ty_logits, ty_mask)
+        # Convert flat position → tile_x, tile_y
+        tile_y = pos_out.action // self.cfg.n_tile_x
+        tile_x = pos_out.action % self.cfg.n_tile_x
 
         actions = {
             "card": card_out.action,
-            "tile_x": tx_out.action,
-            "tile_y": ty_out.action,
+            "tile_x": tile_x,
+            "tile_y": tile_y,
         }
-        log_prob = (
-            card_out.log_prob + tx_out.log_prob + ty_out.log_prob
-        )
-        entropy = (
-            card_out.entropy + tx_out.entropy + ty_out.entropy
-        )
+        log_prob = card_out.log_prob + pos_out.log_prob
+        entropy = card_out.entropy + pos_out.entropy
         value = self.value_head(core_out)
 
         return ModelOutput(

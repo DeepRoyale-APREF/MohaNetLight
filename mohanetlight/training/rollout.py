@@ -143,6 +143,7 @@ class RolloutBuffer:
         - ``troops``     ``(T, 100, 14)``
         - ``troop_mask`` ``(T, 100)``
         - ``cards``      ``(T, 4, 4)``
+        - ``arena_map``  ``(T, 8, 32, 18)``
         - ``action_masks`` dict of ``(T, K)``
         - ``actions``    dict of ``(T,)``
         - ``old_log_probs`` ``(T,)``
@@ -180,6 +181,10 @@ class RolloutBuffer:
             )
             cards = torch.tensor(
                 np.stack([o["cards"] for o in self.obs_list[sl]]),
+                dtype=torch.float32, device=device,
+            )
+            arena_map = torch.tensor(
+                np.stack([o["arena_map"] for o in self.obs_list[sl]]),
                 dtype=torch.float32, device=device,
             )
 
@@ -221,6 +226,7 @@ class RolloutBuffer:
                 "troops": troops,
                 "troop_mask": troop_mask,
                 "cards": cards,
+                "arena_map": arena_map,
                 "action_masks": action_masks,
                 "actions": actions,
                 "old_log_probs": old_log_probs,

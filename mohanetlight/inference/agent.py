@@ -64,11 +64,13 @@ class MohaNetAgent(PlayerSlot):
             self._hidden = self.model.init_hidden(batch_size=1)
             self._hidden = _to_device(self._hidden, self.device)
 
-        scalars, troops, troop_mask, cards, action_masks = state_to_obs_tensors(
+        scalars, troops, troop_mask, cards, arena_map, action_masks = state_to_obs_tensors(
             state, device=self.device,
         )
 
-        output = self.model.act(scalars, troops, troop_mask, cards, action_masks, self._hidden)
+        output = self.model.act(
+            scalars, troops, troop_mask, cards, arena_map, action_masks, self._hidden,
+        )
         self._hidden = output.hidden
 
         actions = output.actions

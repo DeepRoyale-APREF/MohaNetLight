@@ -3,7 +3,7 @@
 Red neuronal ligera inspirada en AlphaStar, especializada para Clash Royale Arena 1.
 Entrenamiento por PPO con cabezas jerárquicas autoregresivas y evaluación continua mediante liga contra bots heurísticos.
 
-**~1.6M parámetros** — entrenable en GPU doméstica o Google Colab gratuito.
+**~1.82M parámetros** — entrenable en GPU doméstica o Google Colab gratuito.
 
 > **Nota:** Este proyecto depende de otros dos repositorios del ecosistema DeepRoyale-APREF — **cr-engine** y **cr-gym** — que **no están publicados en PyPI** y deben clonarse manualmente desde GitHub. El proceso completo se describe en la sección de instalación a continuación.
 
@@ -89,7 +89,7 @@ from mohanetlight import MohaNetLight, ModelConfig
 model = MohaNetLight(ModelConfig())
 print(f'Todo OK — Parámetros del modelo: {model.count_parameters():,}')
 "
-# Salida esperada: Todo OK — Parámetros del modelo: 1,615,355
+# Salida esperada: Todo OK — Parámetros del modelo: 1,818,443
 ```
 
 ---
@@ -143,9 +143,9 @@ MohaNetlight/
 │   ├── __init__.py              # Exporta MohaNetLight, ModelConfig, TrainingConfig
 │   ├── config.py                # ModelConfig (arquitectura) + TrainingConfig (PPO)
 │   ├── network/
-│   │   ├── encoders.py          # ScalarEncoder, EntityEncoder, CardEncoder
-│   │   ├── core.py              # LSTMCore (384→256, 2 capas)
-│   │   ├── heads.py             # Cabezas jerárquicas + ValueHead
+│   │   ├── encoders.py          # ScalarEncoder, EntityEncoder, CardEncoder, ArenaEncoder
+│   │   ├── core.py              # LSTMCore (512→256, 2 capas)
+│   │   ├── heads.py             # CardHead, SpatialDecoder, ValueHead
 │   │   └── mohanet.py           # MohaNetLight (modelo ensamblado)
 │   ├── inference/
 │   │   └── agent.py             # MohaNetAgent (PlayerSlot para liga)
@@ -157,15 +157,20 @@ MohaNetlight/
 │   │   ├── trainer.py           # LeagueTrainer (orquestador completo)
 │   │   └── reward_debugger.py   # RewardDebugger — diagnóstico de señales de recompensa
 │   └── utils/
-│       └── tensor_utils.py      # Conversión obs→tensores
+│       └── tensor_utils.py      # Conversión obs→tensores (incluye arena_map)
+├── train/
+│   ├── __init__.py              # Exporta CurriculumTrainer, PhaseConfig, report generators
+│   ├── curriculum.py            # Entrenamiento por currículum (4 fases progresivas)
+│   ├── report.py                # Generador de gráficos (Retorno, Critic Loss, MA(50))
+│   └── run_curriculum.py        # Punto de entrada CLI para pipeline completo
 ├── scripts/
-│   ├── train_league.py          # Entrenamiento PPO por CLI
+│   ├── train_league.py          # Entrenamiento PPO estándar por CLI
 │   ├── watch_agent.py           # Depurador visual — GUI + overlay de recompensas
 │   └── diagnose_rewards.py      # Diagnóstico headless de señales de recompensa
 ├── notebooks/
 │   └── colab_training.ipynb     # Configuración + entrenamiento en Google Colab
 ├── tests/
-│   └── test_network.py          # 35 tests (shapes, forward pass, buffer, bots)
+│   └── test_network.py          # Tests (shapes, forward pass, buffer, bots)
 ├── pyproject.toml
 └── README.md
 ```
@@ -175,41 +180,38 @@ MohaNetlight/
 ## Arquitectura
 
 ```
-┌─────────────┐  ┌──────────────────┐  ┌─────────────┐
-│   Scalars   │  │     Entities     │  │    Cards    │
-│  MLP 16→128 │  │ Transformer L=2  │  │  MLP 5→128  │
-│             │  │  H=4, d=64       │  │  (×8 cards) │
-│             │  │ + Pos. Encoding   │  │             │
-└──────┬──────┘  └────────┬─────────┘  └──────┬──────┘
-       │                  │                    │
-       └──────────┬───────┴────────────────────┘
-                  │ concat → 384
+┌─────────────┐  ┌──────────────────┐  ┌─────────────┐  ┌──────────────┐
+│   Scalars   │  │     Entities     │  │    Cards    │  │   Arena Map  │
+│  MLP 16→128 │  │ Transformer L=2  │  │  MLP 5→128  │  │  CNN 8→64    │
+│             │  │  H=4, d=64       │  │  (×8 cards) │  │  (32×18)     │
+│             │  │ + Pos. Encoding   │  │             │  │  → 128       │
+└──────┬──────┘  └────────┬─────────┘  └──────┬──────┘  └──────┬───────┘
+       │                  │                    │               │
+       └──────────┬───────┴────────────────────┴───────────────┘
+                  │ concat → 512
           ┌───────▼───────┐
           │   LSTM Core   │
-          │  384→256, L=2 │
+          │  512→256, L=2 │
           └───────┬───────┘
                   │ 256
-    ┌─────────────┼─────────────────────────┐
-    │             │                         │
-    │   ┌─────────▼──────────┐              │
-    │   │  Card Head         │←── entity ctx│
-    │   │  384→128→9         │              │
-    │   └────────┬───────────┘              │
-    │            │ embed(9→64)              │
-    │   ┌────────▼──────────┐               │
-    │   │  Tile X Head      │←── entity ctx │
-    │   │  448→128→18       │               │
-    │   └────────┬──────────┘               │
-    │            │ embed(18→64)             │
-    │   ┌────────▼──────────┐               │
-    │   │  Tile Y Head      │←── entity ctx │
-    │   │  448→128→32       │               │
-    │   └────────┬──────────┘               │
-    │            │                          │
-    │   ┌────────▼──────────┐    ┌──────────▼───┐
-    │   │  Acciones (π)     │    │  Value Head  │
-    │   │  {card, x, y}     │    │  256→128→1   │
-    │   └───────────────────┘    └──────────────┘
+    ┌─────────────┼────────────────────────────────┐
+    │             │                                │
+    │   ┌─────────▼──────────┐                     │
+    │   │  Card Head         │←── entity ctx       │
+    │   │  384→128→9         │                     │
+    │   └────────┬───────────┘                     │
+    │            │ embed(9→64)                     │
+    │   ┌────────▼─────────────────────┐           │
+    │   │  Spatial Decoder (FiLM)      │           │
+    │   │  context → γ,β → ResBlocks   │           │
+    │   │  Arena features → 32×18      │           │
+    │   │  → softmax → position (576)  │           │
+    │   └────────┬─────────────────────┘           │
+    │            │                                 │
+    │   ┌────────▼──────────┐    ┌─────────────────▼──┐
+    │   │  Acciones (π)     │    │    Value Head      │
+    │   │  {card, position} │    │    256→128→1       │
+    │   └───────────────────┘    └────────────────────┘
 ```
 
 ### Componentes
@@ -219,18 +221,21 @@ MohaNetlight/
 | `ScalarEncoder` | MLP 16→64→128 (elixir, torres, tiempo, flags) | ~9K |
 | `EntityEncoder` | Transformer 2 capas, 4 cabezas, d=64 + codificación posicional | ~112K |
 | `CardEncoder` | MLP compartido por carta 5→32, agregado 256→128 | ~17K |
-| `LSTMCore` | LSTM(384→256, 2 capas, dropout=0.1) | ~1.18M |
-| Cabezas jerárquicas | Card→TileX→TileY con embeddings autorregresivos | ~200K |
+| `ArenaEncoder` | CNN 8→32→64→64, global avg pool → 128 | ~50K |
+| `LSTMCore` | LSTM(512→256, 2 capas, dropout=0.1) | ~1.31M |
+| `CardHead` | MLP 384→128→9 con contexto entidad | ~55K |
+| `SpatialDecoder` | FiLM conditioning + 2 ResBlocks → 32×18 logits | ~180K |
 | `ValueHead` | MLP 256→128→64→1 (crítico) | ~41K |
-| **Total** | | **~1.56M** |
+| **Total** | | **~1.82M** |
 
-### Cabezas autorregresivas
+### Cabezas autorregresivas + Decodificador espacial
 
-Cada cabeza recibe como contexto adicional el **embedding de la acción muestreada** de la cabeza anterior, más el **contexto de entidades** (skip connection del encoder):
+El modelo usa una cadena autorregresiva de dos etapas con decodificación espacial por CNN:
 
-1. **Card** ← salida LSTM + entity_ctx
-2. **Tile X** ← LSTM + embed(card) + entity_ctx  
-3. **Tile Y** ← LSTM + embed(tile_x) + entity_ctx
+1. **Card Head** ← salida LSTM + entity_ctx → selecciona carta (9 opciones)
+2. **SpatialDecoder** ← LSTM + embed(card) + arena features → genera mapa 32×18 (576 posiciones)
+
+El `SpatialDecoder` usa **FiLM conditioning** (Feature-wise Linear Modulation) para inyectar el contexto del agente en las features espaciales del mapa, seguido de 2 `ResBlocks` convolucionales. Finalmente aplica softmax sobre las 576 celdas para obtener la distribución de probabilidad sobre posiciones, enmascarada por `spatial_per_card` (posiciones válidas según la carta seleccionada).
 
 ---
 
@@ -267,15 +272,16 @@ scalars    = torch.randn(B, 16)
 troops     = torch.randn(B, 100, 14).abs()
 troop_mask = torch.zeros(B, 100, dtype=torch.bool)
 troop_mask[0, :5] = True
-cards      = torch.randn(B, 4, 4).abs()
+cards      = torch.randn(B, 8, 5).abs()         # 8 cartas × 5 features
+arena_map  = torch.randn(B, 8, 32, 18).abs()    # CNN: 8 canales × 32×18
 action_masks = {
-    "card":     torch.ones(B, 9,  dtype=torch.bool),
-    "tile_x_per_card": torch.ones(B, 9, 18, dtype=torch.bool),
-    "tile_y_per_card": torch.ones(B, 9, 32, dtype=torch.bool),
+    "card":           torch.ones(B, 9,  dtype=torch.bool),
+    "spatial_per_card": torch.ones(B, 9, 576, dtype=torch.bool),  # 32×18 = 576
 }
 
 hidden = model.init_hidden(B)
-output = model.act(scalars, troops, troop_mask, cards, action_masks, hidden)
+output = model.act(scalars, troops, troop_mask, cards, arena_map,
+                   action_masks, hidden)
 
 print(output.actions)   # {card, tile_x, tile_y} — cada uno Tensor(B,)
 print(output.value)     # V(s) — estimación del crítico
@@ -448,28 +454,100 @@ MohaNetlight/
 │   ├── __init__.py              # Exporta MohaNetLight, ModelConfig, TrainingConfig
 │   ├── config.py                # ModelConfig (arquitectura) + TrainingConfig (PPO)
 │   ├── network/
-│   │   ├── encoders.py          # ScalarEncoder, EntityEncoder, CardEncoder
-│   │   ├── core.py              # LSTMCore (384→256, 2 capas)
-│   │   ├── heads.py             # Cabezas jerárquicas + ValueHead
+│   │   ├── encoders.py          # ScalarEncoder, EntityEncoder, CardEncoder, ArenaEncoder
+│   │   ├── core.py              # LSTMCore (512→256, 2 capas)
+│   │   ├── heads.py             # CardHead, SpatialDecoder, ValueHead
 │   │   └── mohanet.py           # MohaNetLight (modelo ensamblado)
 │   ├── inference/
 │   │   └── agent.py             # MohaNetAgent (PlayerSlot para liga)
 │   ├── bots/
-│   │   └── strategies.py        # 5 bots heurísticos parametrizados
+│   │   └── strategies.py        # 5 bots heurísticos parametrizados + default_bot_roster
 │   ├── training/
 │   │   ├── rollout.py           # RolloutBuffer con estados LSTM
 │   │   ├── ppo.py               # PPOTrainer (clipped surrogate + BPTT truncado)
-│   │   └── trainer.py           # LeagueTrainer (orquestador completo)
+│   │   ├── trainer.py           # LeagueTrainer (orquestador completo)
+│   │   └── reward_debugger.py   # RewardDebugger — diagnóstico de señales de recompensa
 │   └── utils/
-│       └── tensor_utils.py      # Conversión obs→tensores
+│       └── tensor_utils.py      # Conversión obs→tensores (incluye arena_map)
+├── train/
+│   ├── __init__.py              # Exporta CurriculumTrainer, PhaseConfig, report generators
+│   ├── curriculum.py            # Entrenamiento por currículum (4 fases progresivas)
+│   ├── report.py                # Generador de gráficos (Retorno, Critic Loss, MA(50))
+│   └── run_curriculum.py        # Punto de entrada CLI para pipeline completo
 ├── scripts/
-│   └── train_league.py          # Punto de entrada CLI
+│   ├── train_league.py          # Entrenamiento PPO estándar por CLI
+│   ├── watch_agent.py           # Depurador visual — GUI + overlay de recompensas
+│   └── diagnose_rewards.py      # Diagnóstico headless de señales de recompensa
 ├── notebooks/
-│   └── colab_training.ipynb     # Configuración y entrenamiento en Colab
+│   └── colab_training.ipynb     # Configuración + entrenamiento en Google Colab
 ├── tests/
-│   └── test_network.py          # 35 tests (shapes, forward pass, buffer, bots)
+│   └── test_network.py          # Tests (shapes, forward pass, buffer, bots)
 ├── pyproject.toml
 └── README.md
+```
+
+---
+
+## Entrenamiento por currículum
+
+El pipeline de entrenamiento progresivo entrena al agente en 4 fases de dificultad creciente, arrastrando los pesos del modelo entre fases:
+
+| Fase | Nombre | Oponentes | LR | Entropía | Objetivo |
+|------|--------|-----------|------|----------|----------|
+| 1 | `balanced` | 2× BalancedBot | 3e-4 | 0.02 | Aprender mecánicas básicas |
+| 2 | `giant_push` | 2× GiantPushBot | 3e-4 | 0.015 | Aprender a contrarrestar tanques |
+| 3 | `full_league` | 10 bots (todos) | 1.5e-4 | 0.01 | Generalizar contra todas las estrategias |
+| 4 | `self_play` | MohaNet (frozen) | 9e-5 | 0.005 | Refinamiento contra sí mismo |
+
+### Ejecución
+
+```bash
+# Pipeline completo (4 fases × 200K steps cada una)
+python train/run_curriculum.py
+
+# Personalizar steps por fase
+python train/run_curriculum.py --steps-per-phase 500000 --self-play-steps 300000
+
+# Prueba rápida
+python train/run_curriculum.py --steps-per-phase 5000 --self-play-steps 5000
+
+# Sin fase de self-play
+python train/run_curriculum.py --skip-self-play
+
+# Forzar dispositivo
+python train/run_curriculum.py --device cuda
+```
+
+### Reportes generados
+
+Al finalizar, se generan automáticamente gráficos en `logs/curriculum/reports/`:
+
+| Gráfico | Descripción |
+|---------|-------------|
+| `combined_episode_return.png` | Retorno por episodio con MA(50) — todas las fases |
+| `combined_critic_loss.png` | Critic Loss por episodio con MA(50) — todas las fases |
+| `combined_policy_entropy.png` | Policy Loss + Entropy MA(50) — todas las fases |
+| `phases/<nombre>_episode_return.png` | Retorno por fase individual |
+| `phases/<nombre>_critic_loss.png` | Critic Loss por fase individual |
+
+Cada gráfico muestra la métrica cruda (semitransparente) junto con su media móvil de 50 updates.
+
+### Uso programático
+
+```python
+from mohanetlight.config import ModelConfig
+from train.curriculum import CurriculumTrainer, default_curriculum
+from train.report import generate_full_report
+
+# Construir currículum
+phases = default_curriculum(steps_per_phase=200_000)
+
+# Entrenar
+trainer = CurriculumTrainer(phases=phases, model_cfg=ModelConfig())
+all_metrics = trainer.run()
+
+# Generar reportes
+generate_full_report(all_metrics, "./logs/curriculum/reports")
 ```
 
 ---
@@ -507,17 +585,16 @@ MohaNetlight/
 | `troops` | (100, 14) | Entidades: nombre, categoría, posición, HP, stats |
 | `troop_mask` | (100,) | `True` donde hay tropa real (padding = `False`) |
 | `scalars` | (16,) | Elixir, HP torres, tiempo, flags (sin elixir enemigo) |
-| `cards` | (4, 4) | Mano propia: nombre, costo, es_hechizo, es_pagable |
-| `action_mask` | dict | Máscaras por cabeza: strategy(3), card(5), tile_x(18), tile_y(32) |
+| `cards` | (8, 5) | 8 cartas × 5 features (nombre, costo, es_hechizo, es_pagable, cooldown) |
+| `arena_map` | (8, 32, 18) | Mapa espacial CNN: 8 canales × 32 filas × 18 columnas |
+| `action_mask` | dict | `card` (9,) + `spatial_per_card` (9, 576) — posiciones válidas por carta |
 
 ### Acción
 
 | Cabeza | Opciones | Significado |
 |--------|----------|-------------|
-| `strategy` | 3 | AGRESIVO / DEFENSIVO / FARMEAR |
-| `card` | 5 | Slot de mano 0–3 o NOOP (4) |
-| `tile_x` | 18 | Columna del tile (0–17) |
-| `tile_y` | 32 | Fila del tile (0–31) |
+| `card` | 9 | Carta 0–7 o NOOP (8) |
+| `position` | 576 | Posición en el mapa 32×18 (decodificada a tile_x, tile_y) |
 
 ---
 

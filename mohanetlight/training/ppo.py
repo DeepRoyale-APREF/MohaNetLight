@@ -85,6 +85,7 @@ class PPOTrainer:
         troops = chunk["troops"]    # (T, 100, 14)
         troop_mask = chunk["troop_mask"]  # (T, 100)
         cards = chunk["cards"]      # (T, 8, 5)
+        arena_map = chunk["arena_map"]  # (T, 8, 32, 18)
         action_masks: Dict[str, Tensor] = chunk["action_masks"]  # type: ignore[assignment]
         actions: Dict[str, Tensor] = chunk["actions"]  # type: ignore[assignment]
         old_log_probs = chunk["old_log_probs"]  # (T,)
@@ -96,9 +97,10 @@ class PPOTrainer:
         T = scalars.shape[0]
 
         # Normalise advantages (per chunk)
-        adv_std = advantages.std()
-        if adv_std > 1e-8:
-            advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+        if T > 1:
+            adv_std = advantages.std()
+            if adv_std > 1e-8:
+                advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
 
         # Forward through each timestep sequentially (truncated BPTT)
         log_probs_list = []
@@ -118,12 +120,13 @@ class PPOTrainer:
             tr_t = troops[t].unsqueeze(0)       # (1, 100, 14)
             m_t = troop_mask[t].unsqueeze(0)    # (1, 100)
             c_t = cards[t].unsqueeze(0)         # (1, 8, 5)
+            am_t_raw = arena_map[t].unsqueeze(0)  # (1, 8, 32, 18)
 
             am_t = {k: v[t].unsqueeze(0) for k, v in action_masks.items()}
             a_t = {k: v[t].unsqueeze(0) for k, v in actions.items()}
 
             lp, val, ent, h = self.model.evaluate_actions(
-                s_t, tr_t, m_t, c_t, am_t, a_t, h,
+                s_t, tr_t, m_t, c_t, am_t_raw, am_t, a_t, h,
             )
             log_probs_list.append(lp.squeeze(0))
             values_list.append(val.squeeze(0))

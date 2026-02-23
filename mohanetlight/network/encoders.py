@@ -1,7 +1,9 @@
-"""Input encoders — scalar MLP, transformer entity encoder, card encoder.
+"""Input encoders — scalar MLP, transformer entity encoder, card encoder, arena CNN.
 
 Each encoder maps its raw input to a fixed-size vector of ``encoder_dim``
 (default 128) so they can be concatenated before entering the LSTM core.
+The arena CNN additionally produces spatial feature maps used by the
+spatial decoder head.
 """
 
 from __future__ import annotations
@@ -238,3 +240,95 @@ class CardEncoder(nn.Module):
         per_card = self.card_proj(cards)  # (B, 8, 32)
         flat = per_card.reshape(B, -1)    # (B, 256)
         return self.aggregate(flat)        # (B, encoder_dim)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Arena Spatial Encoder (CNN)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class ArenaEncoder(nn.Module):
+    """CNN encoder for the 2-D arena spatial map.
+
+    Produces two outputs:
+
+    1. A global embedding ``(B, encoder_dim)`` for the LSTM core
+       (via global average pooling).
+    2. Spatial feature maps ``(B, C_feat, H, W)`` preserved at input
+       resolution for use by the SpatialDecoder.
+
+    Architecture::
+
+        Conv(8→32, 3, pad=1) + BN + ReLU
+        Conv(32→64, 3, pad=1) + BN + ReLU
+        Conv(64→64, 3, pad=1) + BN + ReLU  (residual)
+        ── global avg pool → Linear(64→128) → encoder embedding
+        ── feature maps (B, 64, 32, 18) → spatial decoder
+
+    Parameters
+    ----------
+    cfg : ModelConfig
+        Architecture configuration.
+    """
+
+    def __init__(self, cfg: ModelConfig) -> None:
+        super().__init__()
+        ch = cfg.arena_cnn_channels  # (32, 64, 64)
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(cfg.arena_channels, ch[0], kernel_size=3, padding=1),
+            nn.BatchNorm2d(ch[0]),
+            nn.ReLU(inplace=True),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(ch[0], ch[1], kernel_size=3, padding=1),
+            nn.BatchNorm2d(ch[1]),
+            nn.ReLU(inplace=True),
+        )
+        # Residual block at ch[2] (same as ch[1] for skip connection)
+        self.conv3a = nn.Sequential(
+            nn.Conv2d(ch[1], ch[2], kernel_size=3, padding=1),
+            nn.BatchNorm2d(ch[2]),
+            nn.ReLU(inplace=True),
+        )
+        self.conv3b = nn.Sequential(
+            nn.Conv2d(ch[2], ch[2], kernel_size=3, padding=1),
+            nn.BatchNorm2d(ch[2]),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+        # Global embedding projection
+        self.global_proj = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(ch[2], cfg.encoder_dim),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, arena_map: Tensor) -> tuple[Tensor, Tensor]:
+        """Encode arena spatial map.
+
+        Parameters
+        ----------
+        arena_map : Tensor
+            Shape ``(B, C, H, W)`` — spatial arena channels.
+
+        Returns
+        -------
+        embedding : Tensor
+            Shape ``(B, encoder_dim)`` — global arena summary for LSTM.
+        feature_maps : Tensor
+            Shape ``(B, C_feat, H, W)`` — full-resolution features
+            for the SpatialDecoder.
+        """
+        x = self.conv1(arena_map)    # (B, 32, H, W)
+        x = self.conv2(x)           # (B, 64, H, W)
+
+        # Residual block
+        identity = x
+        x = self.conv3a(x)          # (B, 64, H, W)
+        x = self.conv3b(x)          # (B, 64, H, W)
+        x = self.relu(x + identity) # (B, 64, H, W)
+
+        embedding = self.global_proj(x)  # (B, encoder_dim)
+        return embedding, x

@@ -519,7 +519,7 @@ def main() -> None:
         help="Path to .pt model checkpoint.  If omitted, uses a random model.",
     )
     parser.add_argument(
-        "--opponent", type=str, default="GiantPush",
+        "--opponent", type=str, default="BridgeSpam",
         help=f"Opponent bot.  Choices: {', '.join(_BOT_MAP)}",
     )
     parser.add_argument(
@@ -602,13 +602,13 @@ def main() -> None:
     try:
         while running:
             # ── Agent inference ─────────────────────────────────────
-            scalars, troops, troop_mask, cards, action_masks = obs_to_tensors(
+            scalars, troops, troop_mask, cards, arena_map, action_masks = obs_to_tensors(
                 obs, device=device,
             )
 
             with torch.no_grad():
                 output = model.act(
-                    scalars, troops, troop_mask, cards, action_masks, hidden,
+                    scalars, troops, troop_mask, cards, arena_map, action_masks, hidden,
                 )
 
             hidden = output.hidden
