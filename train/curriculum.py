@@ -1,17 +1,20 @@
 """Curriculum trainer — progressive multi-phase PPO training.
 
-Implements a 4-phase curriculum:
-1. **Warm-up**: Train exclusively vs BalancedBot (easiest generaliser).
-2. **Tank pressure**: Train exclusively vs GiantPushBot (learn countering).
-3. **Full league**: Train vs all 10 heuristic bots (generalise).
-4. **Self-play**: Train vs best checkpoint of MohaNet itself.
+Implements an 8-phase micro-curriculum (~50 updates each):
+1. **warmup**: Passive + weak Balanced — free wins to bootstrap policy.
+2. **basics**: Balanced(5) + mild Passive — learn elixir management.
+3. **push_intro**: Medium bots + GiantPush — learn to counter pushes.
+4. **aggression**: Balanced(3) + BridgeSpam — face constant pressure.
+5. **diversity**: Mixed strategies (Spam, Spell, DefCounter) — generalise.
+6. **hard**: Expert-parametrized bots (low thresholds) + previous bots.
+7. **full_league**: All 10 default bots + expert bots — final generalisation.
+8. **self_play**: Self-play + league bots — peak competitive play.
 
-Each phase produces its own checkpoint, metrics JSON, and can be resumed.
-The report generator reads these to produce comparison plots.
+Previous-phase opponents are mixed into later phases to prevent
+catastrophic forgetting.  Reports are generated at each phase boundary.
 """
 
 from __future__ import annotations
-from mohanetlight.bots import BridgeSpamBot
 
 import json
 import time
@@ -24,8 +27,16 @@ import torch
 
 from mohanetlight.bots.strategies import (
     BalancedBot,
+    BridgeSpamBot,
     GiantPushBot,
+    OptimalBot,
+    PassiveBot,
     default_bot_roster,
+    easy_bots,
+    expert_bots,
+    hard_bots,
+    medium_bots,
+    optimal_bots,
 )
 from mohanetlight.config import ModelConfig, TrainingConfig
 from mohanetlight.inference.agent import MohaNetAgent
@@ -235,7 +246,7 @@ class CurriculumTrainer:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Default 4-phase curriculum
+# Default 8-phase curriculum — converging toward OptimalBot
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -245,89 +256,158 @@ def default_curriculum(
     n_steps: int = 512,
     lr: float = 3e-4,
     base_seed: int = 42,
+    updates_per_phase: int = 50,
 ) -> List[PhaseConfig]:
-    """Build the default 4-phase curriculum.
+    """Build the default 8-phase micro-curriculum.
+
+    Progressive difficulty from Balanced bots → GiantPush → aggressive
+    strategies → expert bots → OptimalBot → self-play.  Previous
+    opponents are mixed into later phases to prevent forgetting.
 
     Parameters
     ----------
     steps_per_phase : int
-        Env steps for phases 1-3.
+        Ignored when ``updates_per_phase`` is set (kept for CLI compat).
     self_play_steps : int
-        Env steps for phase 4 (self-play).
+        Ignored when ``updates_per_phase`` is set (kept for CLI compat).
     n_steps : int
         Rollout length (steps per PPO update).
     lr : float
         Base learning rate.
     base_seed : int
         Seed for bot RNGs.
+    updates_per_phase : int
+        Number of PPO updates per phase (default 50).
 
     Returns
     -------
     list[PhaseConfig]
-        Four phases: Balanced → GiantPush → Full League → Self-play.
+        Eight phases converging toward beating the OptimalBot.
     """
+    phase_steps = updates_per_phase * n_steps
+
+    # ── Tiered bot pools ──────────────────────────────────────────────────
+    t1 = easy_bots(base_seed)       # Balanced-7, Balanced-5, GiantPush-7
+    t2 = medium_bots(base_seed)     # GiantPush-5, Balanced-3, BridgeSpam-4
+    t3 = hard_bots(base_seed)       # BridgeSpam-3, GiantPush-4, DefCounter-5, SpellCycle-5
+    t4 = expert_bots(base_seed)     # DefCounter-4, Balanced-2, BridgeSpam-2, Optimal-7(0.7)
+    t5 = optimal_bots(base_seed)    # Optimal-7(1.0), Optimal-5(1.0)
     all_bots = default_bot_roster(base_seed)
 
-    # Phase 1: Only Balanced bots (easiest, learn basics)
-    balanced_bots = [
-        BalancedBot("Balanced-5", base_threshold=5.0, seed=base_seed),
-        BalancedBot("Balanced-3", base_threshold=3.0, seed=base_seed + 1),
+    # Eval set: consistent opponents for tracking progress across phases
+    eval_set: List[PlayerSlot] = [
+        BalancedBot("eval-Balanced-5", base_threshold=5.0, seed=base_seed + 90),
+        GiantPushBot("eval-GiantPush-5", elixir_threshold=5.0, seed=base_seed + 91),
+        OptimalBot("eval-Optimal-7", push_threshold=7.0, aggression=1.0, seed=base_seed + 92),
     ]
-
-    # Phase 2: Only Strong bots (learn to counter tanks)
-    strong_bots = [
-        GiantPushBot("GiantPush-7", elixir_threshold=7.0, seed=base_seed + 2),
-        GiantPushBot("GiantPush-5", elixir_threshold=5.0, seed=base_seed + 3),
-        BridgeSpamBot("BridgeSpam-5", seed=base_seed + 4),
-        BridgeSpamBot("BridgeSpam-3", seed=base_seed + 5),
-    ]
-
-    # Phase 3: Full league (all 10 bots)
-    # Phase 4: Self-play is configured separately by the runner
 
     return [
+        # ── Phase 1: warmup ──────────────────────────────────────────────
+        # Balanced + cautious GiantPush — easy wins, the agent already
+        # beats these.  Bootstraps the policy.
         PhaseConfig(
-            name="balanced",
-            total_timesteps=steps_per_phase,
-            training_opponents=balanced_bots,
-            eval_opponents=balanced_bots,
+            name="warmup",
+            total_timesteps=phase_steps,
+            training_opponents=t1,
+            eval_opponents=eval_set,
             n_steps=n_steps,
             lr=lr,
             ent_coef=0.02,
             eval_interval=25,
             checkpoint_interval=25,
         ),
+        # ── Phase 2: push_defense ────────────────────────────────────────
+        # Agent learns to counter faster giant pushes + constant pressure.
+        # Recalls Balanced-7 to not forget easy matchups.
         PhaseConfig(
-            name="strong",
-            total_timesteps=steps_per_phase,
-            training_opponents=strong_bots,
-            eval_opponents=strong_bots,
+            name="push_defense",
+            total_timesteps=phase_steps,
+            training_opponents=t2 + [t1[0]],  # + Balanced-7 recall
+            eval_opponents=eval_set,
+            n_steps=n_steps,
+            lr=lr,
+            ent_coef=0.02,
+            eval_interval=25,
+            checkpoint_interval=25,
+        ),
+        # ── Phase 3: aggression ──────────────────────────────────────────
+        # Aggressive spam + fast pushes.  Agent learns to defend under
+        # constant pressure.  Recalls GiantPush-5.
+        PhaseConfig(
+            name="aggression",
+            total_timesteps=phase_steps,
+            training_opponents=t3[:3] + [t2[0]],  # BridgeSpam-3, GiantPush-4, DefCounter-5 + GiantPush-5
+            eval_opponents=eval_set,
             n_steps=n_steps,
             lr=lr,
             ent_coef=0.015,
             eval_interval=25,
             checkpoint_interval=25,
         ),
+        # ── Phase 4: diversity ───────────────────────────────────────────
+        # All hard archetypes: spam, push, counter, spell.  Agent
+        # generalises defenses.  Recalls easy bots to prevent forgetting.
         PhaseConfig(
-            name="full_league",
-            total_timesteps=steps_per_phase,
-            training_opponents=all_bots,
-            eval_opponents=[all_bots[0], all_bots[2], all_bots[4],
-                            all_bots[6], all_bots[8]],
+            name="diversity",
+            total_timesteps=phase_steps,
+            training_opponents=t3 + [t1[0]],  # full hard + Balanced-7 recall
+            eval_opponents=eval_set,
             n_steps=n_steps,
-            lr=lr * 0.5,  # Reduce LR for fine-tuning
+            lr=lr * 0.8,
+            ent_coef=0.015,
+            eval_interval=25,
+            checkpoint_interval=25,
+        ),
+        # ── Phase 5: expert ──────────────────────────────────────────────
+        # Expert-param bots including a weakened OptimalBot (aggression=0.7).
+        # Agent starts seeing optimal play patterns.  Recalls Balanced-3.
+        PhaseConfig(
+            name="expert",
+            total_timesteps=phase_steps,
+            training_opponents=t4 + [t2[1]],  # expert + Balanced-3 recall
+            eval_opponents=eval_set,
+            n_steps=n_steps,
+            lr=lr * 0.6,
             ent_coef=0.01,
             eval_interval=25,
             checkpoint_interval=25,
         ),
+        # ── Phase 6: optimal_intro ───────────────────────────────────────
+        # Full-strength OptimalBot enters, mixed with expert bots for
+        # variety.  Agent can explore strategies that counter optimal play.
+        PhaseConfig(
+            name="optimal_intro",
+            total_timesteps=phase_steps,
+            training_opponents=t5 + t4[:2],  # Optimal full + DefCounter-4, Balanced-2 recall
+            eval_opponents=eval_set,
+            n_steps=n_steps,
+            lr=lr * 0.5,
+            ent_coef=0.008,
+            eval_interval=25,
+            checkpoint_interval=25,
+        ),
+        # ── Phase 7: full_league ─────────────────────────────────────────
+        # All bots including OptimalBot — ultimate generalisation test.
+        PhaseConfig(
+            name="full_league",
+            total_timesteps=phase_steps,
+            training_opponents=all_bots + t5,  # 10 default + 2 Optimal
+            eval_opponents=eval_set,
+            n_steps=n_steps,
+            lr=lr * 0.4,
+            ent_coef=0.008,
+            eval_interval=25,
+            checkpoint_interval=25,
+        ),
+        # ── Phase 8: self_play ───────────────────────────────────────────
+        # Self-play + OptimalBot.  Opponents injected by runner.
         PhaseConfig(
             name="self_play",
-            total_timesteps=self_play_steps,
-            training_opponents=[],  # Filled by runner with MohaNetAgent
-            eval_opponents=[all_bots[0], all_bots[2], all_bots[4],
-                            all_bots[6], all_bots[8]],
+            total_timesteps=phase_steps,
+            training_opponents=t5,  # Runner appends MohaNetAgent
+            eval_opponents=eval_set,
             n_steps=n_steps,
-            lr=lr * 0.3,  # Even lower LR
+            lr=lr * 0.3,
             ent_coef=0.005,
             eval_interval=25,
             checkpoint_interval=25,

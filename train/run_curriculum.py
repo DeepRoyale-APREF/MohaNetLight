@@ -3,14 +3,14 @@
 
 Usage::
 
-    # Default curriculum (4 phases, 200K steps each)
+    # Default curriculum (8 micro-phases, ~50 updates each)
     python train/run_curriculum.py
 
-    # Custom step counts
-    python train/run_curriculum.py --steps-per-phase 500000 --self-play-steps 300000
+    # Custom updates per phase
+    python train/run_curriculum.py --updates-per-phase 100
 
     # Quick smoke test
-    python train/run_curriculum.py --steps-per-phase 5000 --self-play-steps 5000
+    python train/run_curriculum.py --updates-per-phase 5 --n-steps 512
 
     # Force device
     python train/run_curriculum.py --device cuda
@@ -43,16 +43,20 @@ def parse_args() -> argparse.Namespace:
         description="Run multi-phase curriculum training for MohaNetLight",
     )
     p.add_argument(
+        "--updates-per-phase", type=int, default=50,
+        help="PPO updates per curriculum phase (default: 50)",
+    )
+    p.add_argument(
         "--steps-per-phase", type=int, default=200_000,
-        help="Env steps for phases 1-3 (default: 200K)",
+        help="(Legacy) Env steps for phases — ignored when --updates-per-phase is set.",
     )
     p.add_argument(
         "--self-play-steps", type=int, default=200_000,
-        help="Env steps for self-play phase (de_fault: 200K)",
+        help="(Legacy) Env steps for self-play phase — ignored when --updates-per-phase is set.",
     )
     p.add_argument(
-        "--n-steps", type=int, default=2048,
-        help="Rollout length — steps per PPO update (default: 2048)",
+        "--n-steps", type=int, default=512,
+        help="Rollout length — steps per PPO update (default: 512)",
     )
     p.add_argument(
         "--lr", type=float, default=3e-4,
@@ -105,6 +109,7 @@ def main() -> None:
         n_steps=args.n_steps,
         lr=args.lr,
         base_seed=args.seed,
+        updates_per_phase=args.updates_per_phase,
     )
 
     if args.skip_self_play:
@@ -232,6 +237,16 @@ def main() -> None:
                 json.dump(phase_metrics, f, indent=2, default=str)
 
             last_checkpoint = trainer._find_last_checkpoint(phase_dir)
+
+            # ── Generate intermediate report after each phase ─────────────
+            report_dir = Path(args.output_dir) / "reports"
+            try:
+                generated = generate_full_report(
+                    trainer.all_metrics, report_dir, ma_window=args.ma_window,
+                )
+                print(f"  Phase report: {len(generated)} plots in {report_dir}/")
+            except ImportError:
+                pass  # matplotlib not available
 
         # Save combined metrics
         combined_path = trainer.base_log_dir / "all_phases_metrics.json"

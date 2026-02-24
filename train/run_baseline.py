@@ -56,7 +56,6 @@ REWARD_PRESETS = {
         "terminal_weight": 0.5,
         "princess_reward": 5.0,
         "win_reward": 10.0,
-        "leak_sensitivity": 0.5,
     },
     "sparse": {
         "damage_weight": 0.0,
@@ -65,7 +64,6 @@ REWARD_PRESETS = {
         "terminal_weight": 1.0,
         "princess_reward": 10.0,
         "win_reward": 20.0,
-        "leak_sensitivity": 0.5,
     },
     "dense": {
         "damage_weight": 8.0,
@@ -74,7 +72,6 @@ REWARD_PRESETS = {
         "terminal_weight": 0.3,
         "princess_reward": 3.0,
         "win_reward": 5.0,
-        "leak_sensitivity": 1.0,
     },
     "damage_only": {
         "damage_weight": 10.0,
@@ -83,7 +80,6 @@ REWARD_PRESETS = {
         "terminal_weight": 0.5,
         "princess_reward": 5.0,
         "win_reward": 10.0,
-        "leak_sensitivity": 0.5,
     },
 }
 

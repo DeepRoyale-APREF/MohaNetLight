@@ -202,7 +202,7 @@ class TrainingConfig:
     n_steps: int = 2560
     n_epochs: int = 4
     batch_chunk_len: int = 32
-    gamma: float = 0.99
+    gamma: float = 0.997
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
     vf_coef: float = 0.5

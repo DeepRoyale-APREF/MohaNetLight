@@ -84,6 +84,7 @@ from mohanetlight.bots.strategies import (
     DefensiveCounterBot,
     GiantPushBot,
     SpellCycleBot,
+    PassiveBot,
 )
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -493,6 +494,7 @@ _BOT_MAP = {
     "SpellCycle": lambda s: SpellCycleBot("SpellCycle", seed=s),
     "DefCounter": lambda s: DefensiveCounterBot("DefCounter", seed=s),
     "Balanced": lambda s: BalancedBot("Balanced", seed=s),
+    "PassiveBot": lambda s: PassiveBot("PassiveBot", seed=s),
 }
 
 
